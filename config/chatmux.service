@@ -1,0 +1,14 @@
+[Unit]
+Description=chatmux daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/matt/.bun/bin/bun run src/core/daemon.ts
+WorkingDirectory=/home/matt/Documents/chatmux
+Restart=on-failure
+RestartSec=10
+Environment=HOME=/home/matt
+
+[Install]
+WantedBy=default.target
