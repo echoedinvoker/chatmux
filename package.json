@@ -1,0 +1,18 @@
+{
+  "name": "chatmux",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/core/daemon.ts",
+    "dev": "bun --watch src/core/daemon.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "@evex/linejs": "npm:@jsr/evex__linejs"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}
