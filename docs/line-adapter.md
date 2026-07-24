@@ -141,6 +141,35 @@ LINE 訊息有多種 content type，adapter 需轉換成統一格式：
 | 14 / `"FILE"` | `"file"` | 檔案 |
 | 其他 | `"text"` | 格式化為 `"[類型名]"`（如 `"[通話]"`, `"[位置]"`） |
 
+## Name Resolution（名字解析）
+
+Adapter 負責所有名字解析，core daemon 只接收已填好 `display_name` 的 event。
+
+### Contact 範圍
+
+`handleGetContacts` 呼叫 `fetchAllContacts`，收集三個來源的 MID：
+
+1. **好友**：`getUserFriendIds()` → `getContactsV3(friendMids)`
+2. **群成員**：`getAllChatMids()` → `getChats(chatMids)` → 從 `extra.groupExtra.memberMids` 提取成員 MID
+3. **DM 對象**：`getMessageBoxes()` → u-prefix MID
+
+聯集後 filter 掉已知好友和自己，剩餘 MID 透過 `fetchContactsByMids` batch fetch（BATCH_SIZE=100）。
+
+### DM 發現
+
+`handleGetChats` 除了群組，也從 `getMessageBoxes()` 取 u-prefix MID 作為 DM chat（`type: "direct"`），名字從 contacts map 查找。
+
+### Event Enrichment（即時事件）
+
+`ContactCache` 在 adapter 啟動後由 `get_contacts` / `get_chats` RPC handler 餵入。收到 live event 時：
+
+1. `enrichSenderName(senderMid, cache, client)`：cache hit → 回傳名字；cache miss → lazy `getContactsV3` → 加入 cache
+2. MID pattern 防呆：`enrichSenderName` 會檢查 `getContactsV3` 回傳的 displayName 是否為 MID pattern（`/^[uc][0-9a-f]{7}/`），是的話不加入 cache
+
+### Backfill 路徑限制
+
+Backfill 事件走 `handleBackfill` RPC 回傳，不經 `connection.onEvent` enrichment。Backfill 事件的 `sender.display_name` 為 undefined。Core 的 `syncEventToSQLite` 用 `platform_id` 作 fallback INSERT，name protection GLOB 確保後續 enriched event 會覆寫成好名字。
+
 ## 已知限制
 
 1. **Bun HTTP/2 不支援** → adapter 必須 Node+tsx runtime
@@ -155,7 +184,10 @@ LINE 訊息有多種 content type，adapter 需轉換成統一格式：
 - `getUserFriendIds` 需 `{ request: { blockStatus: "ALL" } }`，回傳 `res.userFriendMids`
 - `getAllChatMids` 需 `{ request: { withMemberChats: true }, syncReason: "INTERNAL" }`
 - `getContactsV3` 需 `{ mids }`，回傳 `res.responses[].targetUserMid` + `targetProfileDetail.profileName`
+- `getContactsV3` 對**非好友也可用**——回傳 `profileName`（live spike 2026-07-24 驗證）
+- `getContactsV3` 的 `profileName` 缺失時回傳空字串（adapter 不再用 `slice(0,8)` fallback）
 - `getChats` 需 `{ chatMids }`，回傳 `res.chats[].chatMid` + `.chatName`
+- `getChats` 的群成員 MID 在 `extra.groupExtra.memberMids`（`Record<string, number>` map，key=MID, value=timestamp），不在 top-level
 - `getPreviousMessages` 不存在——改用 `getPreviousMessagesV2WithRequest({ request: { messageBoxId, endMessageId, messagesCount }, syncReason: "UNKNOWN" })`
 - `getMessageBoxes({ messageBoxListRequest: {} })` 取得所有有訊息的對話（含 1:1 + 群組）
 - `auth.ts` 的 `login()` 需先 `mkdir(dataDir)` 確保目錄存在，否則 `FileStorage` 讀取 storage.json 會 ENOENT

@@ -83,7 +83,9 @@ runner.onEvent(async (params: unknown) => {
   const event = params as JsonlEvent;
   event.source = "live";
   event.received_at = Date.now();
-  if (!event.sender.display_name) event.sender.display_name = event.sender.platform_id;
+  if (!event.sender.display_name) {
+    console.error("[daemon] WARN: event missing display_name", event.sender.platform_id);
+  }
 
   try {
     jsonl.append(event);
@@ -265,7 +267,14 @@ async function coldStart(): Promise<void> {
         INSERT INTO contacts (platform, platform_id, display_name)
         VALUES ('line', ?, ?)
         ON CONFLICT(platform, platform_id) DO UPDATE SET
-          display_name = excluded.display_name,
+          display_name = CASE
+            WHEN LENGTH(excluded.display_name) > 0
+              AND NOT (excluded.display_name GLOB '[uc][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*')
+            THEN excluded.display_name
+            WHEN LENGTH(contacts.display_name) > 0
+            THEN contacts.display_name
+            ELSE excluded.display_name
+          END,
           updated_at = (unixepoch('now', 'subsec') * 1000)
       `);
       upsert.run(contact.platform_id, contact.display_name);
@@ -307,7 +316,12 @@ async function coldStart(): Promise<void> {
         "SELECT id FROM chats WHERE platform_id = ?"
       ).get(box.id);
 
-      if (!exists) {
+      if (exists) {
+        db.prepare(`
+          UPDATE chats SET last_message_at = MAX(COALESCE(last_message_at, 0), ?)
+          WHERE platform_id = ? AND platform = 'line'
+        `).run(box.lastDeliveredTime || null, box.id);
+      } else {
         const contactName = db.query<{ display_name: string }, [string]>(
           "SELECT display_name FROM contacts WHERE platform_id = ?"
         ).get(box.id);
@@ -352,7 +366,9 @@ async function backfill(): Promise<void> {
       for (const event of result.events) {
         event.source = "backfill";
         event.received_at = Date.now();
-        if (!event.sender.display_name) event.sender.display_name = event.sender.platform_id;
+        if (!event.sender.display_name) {
+          console.error("[daemon] WARN: backfill event missing display_name", event.sender.platform_id);
+        }
         jsonl.append(event);
         syncEventToSQLite(db, event);
       }

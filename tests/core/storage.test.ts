@@ -534,3 +534,72 @@ describe("Integration: JSONL → SQLite → FTS → query", () => {
     }
   });
 });
+
+describe("Name protection: raw MID should not overwrite good names", () => {
+  let db: Database;
+
+  const makeEvent = (
+    id: string,
+    text: string,
+    senderName: string,
+  ): JsonlEvent => ({
+    type: "message",
+    platform: "line",
+    platform_message_id: id,
+    chat: { platform_id: "c_001", type: "direct", name: "Chat" },
+    sender: { platform_id: "u_001", display_name: senderName },
+    timestamp: 1690000000000,
+    content: { type: "text", text },
+    raw: {},
+    source: "live",
+  });
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    initSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("full MID does not overwrite existing display_name", () => {
+    syncEventToSQLite(db, makeEvent("m_001", "hi", "Alice"));
+    syncEventToSQLite(db, makeEvent("m_002", "hi2", "u1234567890abcdef0123456789abcdef0"));
+
+    const contact = db.query<{ display_name: string }, [string]>(
+      "SELECT display_name FROM contacts WHERE platform_id = ?"
+    ).get("u_001")!;
+    expect(contact.display_name).toBe("Alice");
+  });
+
+  test("truncated MID does not overwrite existing display_name", () => {
+    syncEventToSQLite(db, makeEvent("m_001", "hi", "Bob"));
+    syncEventToSQLite(db, makeEvent("m_002", "hi2", "u1234567"));
+
+    const contact = db.query<{ display_name: string }, [string]>(
+      "SELECT display_name FROM contacts WHERE platform_id = ?"
+    ).get("u_001")!;
+    expect(contact.display_name).toBe("Bob");
+  });
+
+  test("C-prefix name (Chris) is NOT treated as MID", () => {
+    syncEventToSQLite(db, makeEvent("m_001", "hi", "Chris"));
+    syncEventToSQLite(db, makeEvent("m_002", "hi2", "u1234567890abcdef"));
+
+    const contact = db.query<{ display_name: string }, [string]>(
+      "SELECT display_name FROM contacts WHERE platform_id = ?"
+    ).get("u_001")!;
+    expect(contact.display_name).toBe("Chris");
+  });
+
+  test("good name overwrites existing raw MID", () => {
+    syncEventToSQLite(db, makeEvent("m_001", "hi", "u1234567890abcdef"));
+    syncEventToSQLite(db, makeEvent("m_002", "hi2", "真名"));
+
+    const contact = db.query<{ display_name: string }, [string]>(
+      "SELECT display_name FROM contacts WHERE platform_id = ?"
+    ).get("u_001")!;
+    expect(contact.display_name).toBe("真名");
+  });
+});

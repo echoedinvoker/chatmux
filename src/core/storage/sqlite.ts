@@ -84,10 +84,17 @@ export function syncEventToSQLite(db: Database, event: JsonlEvent): void {
     INSERT INTO contacts (platform, platform_id, display_name)
     VALUES (?, ?, ?)
     ON CONFLICT(platform, platform_id) DO UPDATE SET
-      display_name = excluded.display_name,
+      display_name = CASE
+        WHEN LENGTH(excluded.display_name) > 0
+          AND NOT (excluded.display_name GLOB '[uc][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*')
+        THEN excluded.display_name
+        WHEN LENGTH(contacts.display_name) > 0
+        THEN contacts.display_name
+        ELSE excluded.display_name
+      END,
       updated_at = (unixepoch('now', 'subsec') * 1000)
   `);
-  upsertContact.run(event.platform, event.sender.platform_id, event.sender.display_name);
+  upsertContact.run(event.platform, event.sender.platform_id, event.sender.display_name ?? event.sender.platform_id);
 
   const contactId = db.query<{ id: number }, [string, string]>(
     "SELECT id FROM contacts WHERE platform = ? AND platform_id = ?"

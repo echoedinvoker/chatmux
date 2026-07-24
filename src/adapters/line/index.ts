@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleOp, handleSendMessage, handleBackfill, type MessageClient } from "./messages.js";
-import { handleGetContacts, handleGetChats, type ContactClient } from "./contacts.js";
+import { handleGetContacts, handleGetChats, ContactCache, enrichSenderName, type ContactClient } from "./contacts.js";
 import { login } from "./auth.js";
 import { createPushSource, ConnectionManager } from "./push.js";
 
@@ -182,6 +182,7 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
 async function main(): Promise<void> {
   let lineClient: (MessageClient & ContactClient) | null = null;
   let connection: ConnectionManager | null = null;
+  let contactCache = new ContactCache([], []);
 
   const responder = new AdapterResponder(process.stdin, process.stdout);
 
@@ -222,12 +223,20 @@ async function main(): Promise<void> {
 
   responder.onRequest("get_contacts", async () => {
     if (!lineClient) throw new Error("Client not initialized");
-    return handleGetContacts(lineClient);
+    const result = await handleGetContacts(lineClient);
+    contactCache.addContacts(
+      result.contacts.map((c) => ({ mid: c.platform_id, displayName: c.display_name })),
+    );
+    return result;
   });
 
   responder.onRequest("get_chats", async () => {
     if (!lineClient) throw new Error("Client not initialized");
-    return handleGetChats(lineClient);
+    const contactsMap = new Map<string, string>();
+    for (const c of contactCache.search("")) {
+      contactsMap.set(c.mid, c.displayName);
+    }
+    return handleGetChats(lineClient, contactsMap);
   });
 
   responder.onRequest("get_message_boxes", async () => {
@@ -290,7 +299,7 @@ async function main(): Promise<void> {
         const res = await client.base.relation.getContactsV3({ mids });
         return (res as any).responses.map((r: any) => ({
           mid: r.targetUserMid,
-          displayName: r.targetProfileDetail?.profileName ?? r.targetUserMid.slice(0, 8),
+          displayName: r.targetProfileDetail?.profileName ?? "",
         }));
       },
       async getAllChatMids() {
@@ -304,6 +313,7 @@ async function main(): Promise<void> {
         return (res as any).chats.map((c: any) => ({
           chatMid: c.chatMid,
           chatName: c.chatName,
+          members: Object.keys(c.extra?.groupExtra?.memberMids ?? {}),
         }));
       },
       async getMessageBoxes() {
@@ -326,6 +336,17 @@ async function main(): Promise<void> {
     connection.onEvent(async (op: any) => {
       const event = await handleOp(op, lineClient!);
       if (event) {
+        if (!event.sender.display_name) {
+          event.sender.display_name = await enrichSenderName(
+            event.sender.platform_id,
+            contactCache,
+            lineClient!,
+          );
+        }
+        if (!event.chat.name) {
+          const cachedChat = contactCache.getChat(event.chat.platform_id);
+          if (cachedChat) event.chat.name = cachedChat.chatName;
+        }
         resp.notify("event", event);
       }
     });

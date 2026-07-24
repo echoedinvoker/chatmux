@@ -24,6 +24,10 @@ function createMockClient(overrides?: Partial<ContactClient>): ContactClient {
     async getChats(chatMids) {
       return chatMids.map((mid) => ({ chatMid: mid, chatName: `Chat ${mid}` }));
     },
+    async getMessageBoxes() {
+      return [];
+    },
+    myMid: "u_self",
     ...overrides,
   };
 }
@@ -143,6 +147,80 @@ describe("handleGetChats", () => {
     expect(result.chats[0].platform_id).toBe("c_001");
     expect(result.chats[0].type).toBe("group");
     expect(result.chats[0].name).toBe("工作群組");
+  });
+});
+
+describe("enrichSenderName", () => {
+  it("resolves unknown sender via getContactsV3 and caches result", async () => {
+    const cache = new ContactCache(
+      [{ mid: "u_001", displayName: "Alice" }],
+      [],
+    );
+    const client = createMockClient({
+      async getContactsV3(mids) {
+        return [{ mid: "u_002", displayName: "Bob" }];
+      },
+    });
+
+    const { enrichSenderName } = await import("../../../src/adapters/line/contacts.js");
+    const name = await enrichSenderName("u_002", cache, client);
+
+    expect(name).toBe("Bob");
+    expect(cache.getContact("u_002")?.displayName).toBe("Bob");
+  });
+});
+
+describe("handleGetChats - DM support", () => {
+  it("returns DM chats with type direct and correct name", async () => {
+    const contactsMap = new Map([["u_001", "Alice"]]);
+    const client = createMockClient({
+      async getAllChatMids() {
+        return { memberChatMids: ["c_001"], invitedChatMids: [] };
+      },
+      async getChats(chatMids) {
+        return [{ chatMid: "c_001", chatName: "Group Chat" }];
+      },
+      async getMessageBoxes() {
+        return [
+          { id: "u_001", lastDeliveredTime: 1000 },
+          { id: "c_001", lastDeliveredTime: 2000 },
+        ];
+      },
+    });
+
+    const result = await handleGetChats(client, contactsMap);
+
+    expect(result.chats).toHaveLength(2);
+    const dm = result.chats.find(c => c.type === "direct");
+    expect(dm).toBeDefined();
+    expect(dm!.platform_id).toBe("u_001");
+    expect(dm!.name).toBe("Alice");
+  });
+});
+
+describe("handleGetContacts - non-friend contacts", () => {
+  it("returns contacts for non-friend group members", async () => {
+    const client = createMockClient({
+      async getUserFriendIds() { return ["u_001"]; },
+      async getContactsV3(mids) {
+        return mids.map((mid) => ({ mid, displayName: `User ${mid}` }));
+      },
+      async getAllChatMids() {
+        return { memberChatMids: ["c_001"], invitedChatMids: [] };
+      },
+      async getChats(chatMids) {
+        return [{ chatMid: "c_001", chatName: "Group", members: ["u_001", "u_002", "u_003"] }];
+      },
+      myMid: "u_self",
+    });
+
+    const result = await handleGetContacts(client);
+
+    expect(result.contacts).toHaveLength(3);
+    const platformIds = result.contacts.map(c => c.platform_id);
+    expect(platformIds).toContain("u_001");
+    expect(platformIds).toContain("u_002");
+    expect(platformIds).toContain("u_003");
   });
 });
 

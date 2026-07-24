@@ -6,6 +6,7 @@ export interface CachedContact {
 export interface CachedChat {
   chatMid: string;
   chatName: string;
+  members?: string[];
 }
 
 export interface ContactClient {
@@ -13,14 +14,16 @@ export interface ContactClient {
   getContactsV3(mids: string[]): Promise<CachedContact[]>;
   getAllChatMids(): Promise<{ memberChatMids: string[]; invitedChatMids: string[] }>;
   getChats(chatMids: string[]): Promise<CachedChat[]>;
+  getMessageBoxes?(): Promise<{ id: string; lastDeliveredTime: number }[]>;
+  myMid?: string;
 }
 
 const BATCH_SIZE = 100;
 
-export async function fetchContactsBatched(
+export async function fetchContactsByMids(
   client: ContactClient,
+  mids: string[],
 ): Promise<CachedContact[]> {
-  const mids = await client.getUserFriendIds();
   if (mids.length === 0) return [];
 
   const results: CachedContact[] = [];
@@ -32,6 +35,47 @@ export async function fetchContactsBatched(
   return results;
 }
 
+export async function fetchContactsBatched(
+  client: ContactClient,
+): Promise<CachedContact[]> {
+  const mids = await client.getUserFriendIds();
+  return fetchContactsByMids(client, mids);
+}
+
+export async function fetchAllContacts(
+  client: ContactClient,
+): Promise<CachedContact[]> {
+  const friendContacts = await fetchContactsBatched(client);
+  const friendMids = new Set(friendContacts.map((c) => c.mid));
+
+  const chats = await fetchChats(client);
+  const groupMemberMids = new Set<string>();
+  for (const chat of chats) {
+    if (chat.members) {
+      for (const mid of chat.members) {
+        groupMemberMids.add(mid);
+      }
+    }
+  }
+
+  const dmMids = new Set<string>();
+  if (client.getMessageBoxes) {
+    const boxes = await client.getMessageBoxes();
+    for (const box of boxes) {
+      if (box.id.startsWith("u")) {
+        dmMids.add(box.id);
+      }
+    }
+  }
+
+  const unknownMids = [
+    ...new Set([...groupMemberMids, ...dmMids]),
+  ].filter((mid) => !friendMids.has(mid) && mid !== client.myMid);
+
+  const unknownContacts = await fetchContactsByMids(client, unknownMids);
+  return [...friendContacts, ...unknownContacts];
+}
+
 export async function fetchChats(client: ContactClient): Promise<CachedChat[]> {
   const { memberChatMids } = await client.getAllChatMids();
   if (memberChatMids.length === 0) return [];
@@ -39,7 +83,7 @@ export async function fetchChats(client: ContactClient): Promise<CachedChat[]> {
 }
 
 export async function handleGetContacts(client: ContactClient) {
-  const contacts = await fetchContactsBatched(client);
+  const contacts = await fetchAllContacts(client);
   return {
     contacts: contacts.map((c) => ({
       platform_id: c.mid,
@@ -49,16 +93,63 @@ export async function handleGetContacts(client: ContactClient) {
   };
 }
 
-export async function handleGetChats(client: ContactClient) {
-  const chats = await fetchChats(client);
-  return {
-    chats: chats.map((c) => ({
+export async function handleGetChats(
+  client: ContactClient,
+  contactsMap?: Map<string, string>,
+) {
+  const groups = await fetchChats(client);
+  const groupMids = new Set(groups.map((g) => g.chatMid));
+
+  const result: { platform_id: string; type: "group" | "direct"; name: string | null; raw?: unknown }[] =
+    groups.map((c) => ({
       platform_id: c.chatMid,
       type: "group" as const,
       name: c.chatName,
       raw: c,
-    })),
-  };
+    }));
+
+  if (client.getMessageBoxes) {
+    const boxes = await client.getMessageBoxes();
+    for (const box of boxes) {
+      if (box.id.startsWith("u")) {
+        result.push({
+          platform_id: box.id,
+          type: "direct",
+          name: contactsMap?.get(box.id) ?? null,
+        });
+      } else if (!groupMids.has(box.id)) {
+        result.push({
+          platform_id: box.id,
+          type: "group",
+          name: null,
+        });
+      }
+    }
+  }
+
+  return { chats: result };
+}
+
+const MID_PATTERN = /^[uc][0-9a-f]{7}/;
+
+export async function enrichSenderName(
+  senderMid: string,
+  cache: ContactCache,
+  client: ContactClient,
+): Promise<string> {
+  const cached = cache.getContact(senderMid);
+  if (cached) return cached.displayName;
+
+  try {
+    const contacts = await client.getContactsV3([senderMid]);
+    const contact = contacts[0];
+    if (contact && contact.displayName && !MID_PATTERN.test(contact.displayName)) {
+      cache.addContacts([contact]);
+      return contact.displayName;
+    }
+  } catch {}
+
+  return senderMid;
 }
 
 interface SearchResult {

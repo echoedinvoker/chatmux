@@ -86,7 +86,7 @@ Notification 沒有 `id` 欄位，core 不回覆。
 
 ### `get_contacts`
 
-取得平台聯絡人列表。
+取得平台所有可見聯絡人（好友 + 群組成員 + DM 對象）。
 
 **Request params**：`{}`
 
@@ -106,7 +106,7 @@ Notification 沒有 `id` 欄位，core 不回覆。
 
 ### `get_chats`
 
-取得聊天列表（群組 + 個人）。
+取得聊天列表（群組 + DM）。LINE adapter 從 `getAllChatMids` 取群組，從 `getMessageBoxes` 補 DM（u-prefix）。
 
 **Request params**：`{}`
 
@@ -118,14 +118,20 @@ Notification 沒有 `id` 欄位，core 不回覆。
       "platform_id": "c1234567890abcdef",
       "type": "group",
       "name": "工作群組",
-      "members": ["u1234", "u5678"],
       "raw": { ... }
+    },
+    {
+      "platform_id": "u1234567890abcdef",
+      "type": "direct",
+      "name": "Alice"
     }
   ]
 }
 ```
 
 `type`：`"direct"` | `"group"` | `"room"`
+
+DM 的 `name` 取自 contacts map（由先前 `get_contacts` 結果建立）。未知 DM 的 name 為 null。
 
 ### `get_message_boxes`
 
