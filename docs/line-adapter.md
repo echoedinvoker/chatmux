@@ -191,3 +191,4 @@ Backfill 事件走 `handleBackfill` RPC 回傳，不經 `connection.onEvent` enr
 - `getPreviousMessages` 不存在——改用 `getPreviousMessagesV2WithRequest({ request: { messageBoxId, endMessageId, messagesCount }, syncReason: "UNKNOWN" })`
 - `getMessageBoxes({ messageBoxListRequest: {} })` 取得所有有訊息的對話（含 1:1 + 群組）
 - `auth.ts` 的 `login()` 需先 `mkdir(dataDir)` 確保目錄存在，否則 `FileStorage` 讀取 storage.json 會 ENOENT
+- `sendCompactMessage({ to: myMid, text })` 送自身 MID 可行——訊息出現在「與自己的聊天」中，回傳正常的 `{ sequenceId, messageId, createdTime }`（live spike 2026-07-24 驗證）。可作為 integration test 的安全 send target

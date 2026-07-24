@@ -87,6 +87,8 @@ Two independent ErrorTracker+KillSwitch instances:
 | `CHATMUX_DATA_DIR` | `~/.local/share/chatmux` | Data directory (JSONL, SQLite, media, auth) |
 | `CHATMUX_SOCKET` | `$CHATMUX_DATA_DIR/chatmux.sock` | MCP unix socket path |
 | `CHATMUX_LOG_LEVEL` | `info` | Log level |
+| `CHATMUX_LIVE_TEST` | (unset) | Set to `1` to enable live integration tests (see `docs/testing.md`) |
+| `CHATMUX_TEST_CHAT_ID` | (unset) | Send target MID for live tests, e.g. `line:u1234...` |
 
 ## References
 

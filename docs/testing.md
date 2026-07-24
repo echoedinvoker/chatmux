@@ -130,7 +130,66 @@ test("should handle async operation", async () => {
 ### 跑測試
 
 ```bash
-bun test                           # 全部
+bun test                           # 全部（integration test 預設 skip）
 bun test tests/core/storage.test.ts  # 單檔
 bun test --timeout 10000           # 長超時（整合測試）
+```
+
+## Live Integration Test
+
+Unit test 用 mock 隔離每一層，但 mock 恰好隱藏了跨層串接的 bug（v0.1 的三個 send bug 全因此漏網）。Live integration test 走完 `handleSendMessage` (tools.ts) → `AdapterRunner` → adapter 子程序 → 平台 API 全鏈路，用真實平台 session 驗證。
+
+### 為什麼 gate
+
+Live test 需要：真實平台登入 session、平台 device slot（LINE 的 IOSIPAD slot 只能一個 client）、安全的 send target。不能進 CI，手動觸發。
+
+### Gating 機制
+
+| 環境變數 | 必要性 | 說明 |
+|---------|--------|------|
+| `CHATMUX_LIVE_TEST` | 必要 | 設為 `1` 啟用，未設或其他值 → `describe.skipIf` 跳過 |
+| `CHATMUX_TEST_CHAT_ID` | 必要 | Send target MID（帶 platform prefix，如 `line:u1234...`）。每個平台的取得方式不同，spike 時取得後填入 |
+| `CHATMUX_DATA_DIR` | 選填 | 預設 `~/.local/share/chatmux`。需含有效的 auth session |
+
+### 跑法
+
+```bash
+# 前置：停其他佔用 device slot 的 client
+systemctl --user stop chatmux          # chatmux daemon（有 Restart=on-failure，必須 stop 不能 kill）
+pgrep -f 'line-tui' && kill $(pgrep -f 'line-tui')  # line-tui（前景 TUI，手動終止）
+
+# 跑 live test（timeout 加長，等平台登入）
+CHATMUX_TEST_CHAT_ID=line:<your-mid> CHATMUX_LIVE_TEST=1 bun test tests/integration/ --timeout 180000
+
+# 完成後恢復
+systemctl --user start chatmux
+```
+
+### 如何為你的 adapter 寫 live integration test（黃金範本）
+
+1. 在 `tests/integration/<platform>-send.test.ts` 建測試
+2. **Env gating**：`describe.skipIf(process.env.CHATMUX_LIVE_TEST !== "1")`
+3. **Setup**（`beforeAll`）：
+   - 驗證 `CHATMUX_TEST_CHAT_ID` env 存在（必要參數，不自動發現）
+   - 建立 `SafetyRail`（用預設值）
+   - 建立 `AdapterRunner`：自行實作 `spawn` callback，參考 `daemon.ts` 的 wiring pattern（stdin/stdout pipe、stderr inherit、cwd 設為專案根目錄）
+   - `runner.start()` 只等 `initialize` RPC，不等平台登入。等 `status: "connected"` notification 才算就緒
+   - 設 120 秒 connected timeout（平台登入可能需要時間）
+4. **選安全 send target**：透過 `CHATMUX_TEST_CHAT_ID` env 指定。推薦用自身帳號（send-to-self）或專用 test group，避免騷擾真人。每個平台的 self-id 取得方式不同，spike 時取得後填入 env
+5. **Test case**：呼叫 `handleSendMessage(deps, { chat_id: "<platform>:<target>", text: "..." })`
+   - `chat_id` 帶 platform prefix（驗證 prefix strip）
+   - `deps.sendToAdapter` 接 `runner.sendRequest`
+   - `deps.isAdapterConnected` 回 `true`（已等 connected）
+6. **斷言**：`result.success === true`、`result.message_id` 存在且非空、`result.timestamp` 是數字
+7. **Teardown**（`afterAll`）：`runner.stop()`
+8. **Mutation sanity check**（手動，不在 CI）：至少驗證一個 regression——暫時破壞 send 路徑的某一層 → test 變紅 → 還原 → test 回綠。證明測試有牙
+
+### Test 檔案結構
+
+```
+tests/
+├── core/           # unit tests（mock 邊界）
+├── adapters/       # unit tests（mock 邊界）
+└── integration/    # live integration tests（env-gated，真實平台 API）
+    └── line-send.test.ts
 ```
