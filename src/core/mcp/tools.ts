@@ -239,7 +239,7 @@ export async function handleSendMessage(
   try {
     const result = await deps.sendToAdapter("send_message", {
       chat_id: params.chat_id,
-      text: params.text,
+      content: { type: "text", text: params.text },
     }) as { message_id?: string; timestamp?: number };
 
     deps.safetyRail.recordSuccess();

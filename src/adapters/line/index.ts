@@ -259,7 +259,7 @@ async function main(): Promise<void> {
         }
       },
       async sendCompactMessage(to: string, text: string) {
-        return client.base.talk.sendCompactMessage(to, text);
+        return client.base.talk.sendCompactMessage({ to, text });
       },
       async getPreviousMessages(chatMid: string, count: number, before?: { deliveredTime: bigint; messageId: bigint }) {
         let endMessageId: any;
