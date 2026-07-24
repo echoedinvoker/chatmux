@@ -176,8 +176,7 @@ export async function handleSendMessage(
   client: MessageClient,
   params: SendMessageParams,
 ): Promise<SendMessageResult> {
-  const chatId = params.chat_id.includes(":") ? params.chat_id.split(":").slice(1).join(":") : params.chat_id;
-  const result = await client.sendCompactMessage(chatId, params.content.text);
+  const result = await client.sendCompactMessage(params.chat_id, params.content.text);
   return {
     message_id: String(result.messageId),
     timestamp: result.createdTime,

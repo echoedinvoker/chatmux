@@ -1,14 +1,18 @@
 # Adapter Protocol
 
-> **Validated against**: LINE only. 跨平台通用性未證，待 adapter #2（v0.2）。
+> **Protocol Version**: 0.2
+> **Validated against**: LINE (v0.1), Telegram (v0.2)
+> **Changelog**: see bottom of document
 
-chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JSON-RPC 與 core daemon 通訊。
+chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JSON-RPC 與 core daemon 通訊。Adapter 可以用任何語言實作，可以在 chatmux monorepo 內或獨立 repo。
 
 ## 傳輸層
 
 - **編碼**：UTF-8 JSON，每行一個完整 JSON object（newline `\n` 分隔）
 - **管道**：stdin（core → adapter）、stdout（adapter → core）
 - **stderr**：adapter 自由使用，core 轉錄到 daemon log
+
+> **非 Node.js adapter 注意**：Python、Go、Rust 等語言的 stdout 在 pipe 模式下預設**區塊緩衝**（不是行緩衝）。Adapter 必須確保每寫完一行 JSON 就 flush。Python 範例：`sys.stdout.reconfigure(line_buffering=True)`（模組頂層）。不解決此問題會導致 JSON-RPC response 卡在緩衝區、core readline 永遠收不到。
 
 ## 訊息格式
 
@@ -55,6 +59,45 @@ chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JS
 
 Notification 沒有 `id` 欄位，core 不回覆。
 
+## Adapter 配置
+
+Adapter 的啟動命令、工作目錄、環境變數由 `$CHATMUX_DATA_DIR/adapters.json` 配置：
+
+```json
+{
+  "adapters": [
+    {
+      "platform": "line",
+      "command": "node",
+      "args": ["--import", "tsx", "src/adapters/line/index.ts"],
+      "cwd": "/path/to/chatmux",
+      "enabled": true
+    },
+    {
+      "platform": "telegram",
+      "command": "/path/to/venv/bin/python",
+      "args": ["/path/to/chatmux-adapter-telegram/main.py"],
+      "env": {
+        "TELEGRAM_API_ID": "12345678",
+        "TELEGRAM_API_HASH": "abcdef..."
+      },
+      "enabled": true
+    }
+  ]
+}
+```
+
+| 欄位 | 必填 | 說明 |
+|------|------|------|
+| `platform` | 是 | 平台識別符，與 `initialize` response 的 platform 一致 |
+| `command` | 是 | 可執行檔路徑（外部 adapter 建議用**絕對路徑**，如 venv 的 python） |
+| `args` | 是 | 命令參數陣列 |
+| `cwd` | 否 | 工作目錄，預設為 adapter 檔案所在目錄 |
+| `env` | 否 | Per-adapter 環境變數，merge 進 subprocess env。用於 API key 等機密，避免全域 env 撞名 |
+| `enabled` | 是 | 是否啟用 |
+
+Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
+
 ## Core → Adapter Requests
 
 ### `initialize`
@@ -64,10 +107,12 @@ Notification 沒有 `id` 欄位，core 不回覆。
 **Request params**：
 ```json
 {
-  "data_dir": "/home/user/.local/share/chatmux/adapters/line",
+  "data_dir": "/home/user/.local/share/chatmux",
   "platform": "line"
 }
 ```
+
+`data_dir` 是 chatmux 的頂層資料目錄。Adapter 應在 `{data_dir}/adapters/{platform}/` 下建立自己的子目錄，存放 session 檔、cache 等平台特有資料。例如 Telegram adapter 把 session 檔存在 `{data_dir}/adapters/telegram/chatmux.session`。
 
 **Response result**：
 ```json
@@ -86,7 +131,7 @@ Notification 沒有 `id` 欄位，core 不回覆。
 
 ### `get_contacts`
 
-取得平台所有可見聯絡人（好友 + 群組成員 + DM 對象）。
+取得平台定義的聯絡人。不同平台的聯絡人範圍差異很大——LINE 有明確的好友列表，Telegram 只回傳手機通訊錄中的聯絡人（可能為空）。Core 用聯絡人做 display_name 查詢，但不依賴聯絡人列表的完整性——backfill/live event 中的 sender 資訊由 adapter 自行解析（如 Telegram 用 `msg.get_sender()` 查 entity cache）。
 
 **Request params**：`{}`
 
@@ -104,9 +149,11 @@ Notification 沒有 `id` 欄位，core 不回覆。
 }
 ```
 
+`raw` 是選填，保留平台原始資料供 debug。
+
 ### `get_chats`
 
-取得聊天列表（群組 + DM）。LINE adapter 從 `getAllChatMids` 取群組，從 `getMessageBoxes` 補 DM（u-prefix）。
+取得聊天列表（群組 + DM）。
 
 **Request params**：`{}`
 
@@ -131,27 +178,24 @@ Notification 沒有 `id` 欄位，core 不回覆。
 
 `type`：`"direct"` | `"group"` | `"room"`
 
-DM 的 `name` 取自 contacts map（由先前 `get_contacts` 結果建立）。未知 DM 的 name 為 null。
+`raw` 是選填。DM 的 `name` 取自 contacts map 或 adapter 自行解析。未知 DM 的 name 為 null。
 
-### `get_message_boxes`
+### `get_message_boxes`（optional）
 
-取得所有有訊息的對話（含 1:1 + 群組），用於冷啟動 backfill 發現。
+> **v0.2 起為 optional**。若 adapter 不支援，回 JSON-RPC error `-32601` (Method not found)，core 跳過此步驟，直接用 `get_chats` 結果做 backfill 排序。
+
+取得所有有訊息的對話清單，用於冷啟動 backfill 發現。此方法源自 LINE 的 messageBoxes API，其他平台的 dialogs/conversations API 通常已由 `get_chats` 涵蓋。
 
 **Request params**：`{}`
 
-**Response result**：
+**Response result**（raw array，非 object 包裝）：
 ```json
-{
-  "chats": [
-    {
-      "platform_id": "c1234567890abcdef",
-      "type": "group",
-      "name": "工作群組",
-      "members": ["u1234", "u5678"],
-      "raw": { ... }
-    }
-  ]
-}
+[
+  {
+    "id": "c1234567890abcdef",
+    "lastDeliveredTime": 1690000000000
+  }
+]
 ```
 
 ### `send_message`
@@ -168,6 +212,8 @@ DM 的 `name` 取自 contacts map（由先前 `get_contacts` 結果建立）。�
   }
 }
 ```
+
+`chat_id` 是 raw `platform_id`（不帶 `platform:` 前綴）。Core 負責路由（從 composite ID 提取 platform 和 platform_id），adapter 收到的永遠是 bare platform_id。
 
 **Response result**（成功）：
 ```json
@@ -197,6 +243,8 @@ DM 的 `name` 取自 contacts map（由先前 `get_contacts` 結果建立）。�
   "count": 50
 }
 ```
+
+`chat_id` 是 raw `platform_id`（不帶前綴），同 `send_message`。
 
 **Response result**：
 ```json
@@ -257,15 +305,20 @@ Core 送出 shutdown 後等最多 5 秒。超時則 SIGTERM → 再等 3 秒 →
 }
 ```
 
+`raw` 是選填——保留平台原始資料供 debug，core 不解析但會存到 JSONL。若平台原始物件無法直接 JSON 序列化（如 Telethon 的 Message 含 circular reference），可省略或萃取可序列化子集。
+
 #### Event Type Enum
 
 | type | 說明 | content 結構 |
 |------|------|-------------|
 | `message` | 新訊息 | `{ type: "text"\|"image"\|"video"\|"audio"\|"sticker"\|"file", text?, media_url?, sticker_id?, file_name? }` |
-| `read_receipt` | 已讀 | `{ chat_id, read_up_to: timestamp }` |
+| `read_receipt` | 已讀（v0.2 defer：語義因平台而異，adapter 視能力決定是否支援） | `{ chat_id, read_up_to: timestamp }` |
 | `unsend` | 撤回訊息 | `{ message_id }` |
 
-`raw` 欄位保留平台原始資料（debug 用），不索引到 FTS。
+**`unsend` 注意事項**：
+- `timestamp` 可為 0 或 null——部分平台（如 Telegram）的刪除事件不提供撤回時間，core 應容忍。
+- 若平台一次刪除多則訊息（如 Telegram 的 `MessageDeleted` 帶多個 ID），adapter 應對每個被刪訊息各發一個 unsend notification。
+- 部分平台（如 Telegram 私聊）的刪除事件不帶 `chat_id`，adapter 應跳過這些事件並在 stderr log 警告。
 
 ### `status`
 
@@ -315,6 +368,9 @@ Core spawn adapter process
   ├─ Core sends: get_chats {}
   │   └─ Adapter responds: { chats: [...] }
   │
+  ├─ Core sends: get_message_boxes {} (optional, skip on -32601)
+  │   └─ Adapter responds: [ { id, lastDeliveredTime } ] or error -32601
+  │
   ├─ Core sends: backfill { chat_id, before_timestamp, count }  (repeated per chat)
   │   └─ Adapter responds: { events, has_more, oldest_timestamp }
   │
@@ -334,23 +390,33 @@ Core spawn adapter process
       └─ KillSwitch at 5 consecutive crashes → stop restart attempts
 ```
 
-## 如何寫一個新 Adapter
+## Auth 策略
 
-> 本指南適用於 v0.2+ 新增平台。v0.1 只有 LINE adapter。
+不同平台的首次認證方式差異很大：
+
+| 策略 | 說明 | 範例 |
+|------|------|------|
+| **stdin 互動** | Adapter 在 daemon spawn 模式下透過 stdin 與使用者互動（QR 碼、authToken） | LINE adapter |
+| **獨立登入流程** | 首次 auth 需要獨立執行（如 `python main.py --auth`），產出 session/token 檔。後續 daemon spawn 用 session 檔自動重連 | Telegram adapter（`--auth` 模式） |
+| **API token** | 透過 `adapters.json` 的 `env` 欄位注入 API token，不需互動登入 | Bot-based adapter |
+
+Adapter 應在 README 中記載其 auth 流程。若採用「獨立登入流程」策略，`--auth` 模式下的 `data_dir` 應讀 `CHATMUX_DATA_DIR` 環境變數（或預設 `~/.local/share/chatmux`），確保與 daemon spawn 路徑用同一個 session 檔位置。
+
+## 如何寫一個新 Adapter
 
 ### 最小實作
 
-一個合法的 adapter 只需要：
+一個合法的 adapter 是任意語言的獨立程式，只需要：
 
-1. **讀 stdin、寫 stdout**：newline-delimited JSON-RPC
+1. **讀 stdin、寫 stdout**：newline-delimited JSON-RPC（注意非 Node.js 語言的 stdout 緩衝問題——見§傳輸層）
 2. **處理 `initialize` request**：回報 capabilities
 3. **處理 `shutdown` request**：優雅退出
 4. **發送 `event` notification**：把平台事件轉成統一格式
 
 ### 步驟
 
-1. 建立 `src/adapters/<platform>/index.ts`（或任意語言的入口）
-2. 實作 stdin JSON-RPC reader + stdout writer
+1. 建立獨立 repo 或 monorepo 子目錄，任意語言的入口程式
+2. 實作 stdin JSON-RPC reader + stdout writer（確保 stdout 行緩衝）
 3. 實作 `initialize` handler，回報：
    - `supported_events`：支援的 event type subset
    - `can_send`：是否支援發送
@@ -359,11 +425,36 @@ Core spawn adapter process
 4. 連接平台，收到事件後發 `event` notification
 5. 若 `can_send: true`，實作 `send_message` handler
 6. 若 `can_backfill: true`，實作 `backfill` handler
-7. 在 `config/` 或 core 設定中註冊新 adapter 的啟動命令
+7. 在 `$CHATMUX_DATA_DIR/adapters.json` 中註冊 adapter 的啟動命令和環境變數
 
 ### 注意事項
 
+- Adapter 可以是 monorepo 內的 TypeScript/Node、獨立 repo 的 Python、或任何語言——只要能讀寫 stdin/stdout JSON-RPC
 - Adapter **不可以**直接讀寫 Storage（JSONL/SQLite）——只能透過 stdio 跟 core 通訊
 - Adapter **不可以**放寬 rate limit——只能回報更嚴的限制
-- `raw` 欄位放平台原始資料，core 不解析但會存到 JSONL
+- `raw` 欄位選填，放平台原始資料供 debug。無法 JSON 序列化時可省略
+- Core → adapter 的 `chat_id` 一律是 raw `platform_id`（不帶 `platform:` 前綴），adapter 不需要自行剝除前綴
+- Adapter 應在 `{data_dir}/adapters/{platform}/` 下建子目錄存放 session 檔等平台資料
 - Adapter crash 由 core 的 Adapter Runner 自動重啟（有 backoff），不需要自己處理
+- 外部 adapter 的環境變數（API key 等）透過 `adapters.json` 的 `env` 欄位注入
+
+---
+
+## Changelog
+
+### v0.2（Telegram adapter 驗證後泛化）
+
+| 改動 | Gap ID | 說明 |
+|------|--------|------|
+| 新增 §Adapter 配置 | G-new-3 | 記載 adapters.json 格式與 env 欄位 |
+| §傳輸層加 stdout 緩衝提醒 | G-new-2 | 非 Node.js adapter 必讀 |
+| §initialize 修正 data_dir 說明 | G7 | 記載子目錄慣例 `{data_dir}/adapters/{platform}/` |
+| §get_contacts 措辭修正 | G-new-5 | 「所有可見聯絡人」→「平台定義的聯絡人」，承認跨平台差異 |
+| §get_message_boxes 改為 optional | G1, G-new-11 | 非 LINE 平台的 dialogs API 通常已由 get_chats 涵蓋；response 格式改為實際的 raw array |
+| §send_message chat_id 說明 | G-new-12, G-new-6 | 明確 chat_id 是 raw platform_id（無前綴）；core 負責路由和剝除前綴 |
+| §backfill chat_id 說明 | G-new-12 | 同上 |
+| `raw` 欄位標為選填 | G-new-9 | 無法 JSON 序列化時可省略 |
+| §Event unsend 注意事項 | G-new-10, G5, G8 | timestamp 可為 0；多 ID 拆成多 notification；缺 chat_id 跳過 |
+| 新增 §Auth 策略 | G-new-1 | 記載 stdin 互動 / 獨立登入 / API token 三種模式 |
+| §如何寫一個新 Adapter 重寫 | G6 | 移除 monorepo 假設，改為「任意語言的獨立程式」 |
+| read_receipt 加 defer 標記 | G3 | 語義因平台而異，v0.2 暫不強制 |

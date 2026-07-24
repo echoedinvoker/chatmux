@@ -306,9 +306,8 @@ async function coldStartAdapter(platform: string): Promise<void> {
     console.error(`[daemon] [${platform}] discovered ${boxes.length} active conversations (incl. 1:1)`);
 
     for (const box of boxes) {
-      const isGroup = box.id.startsWith("c");
-      const exists = db.query<{ id: number }, [string, string]>(
-        "SELECT id FROM chats WHERE platform = ? AND platform_id = ?"
+      const exists = db.query<{ id: number; type: string }, [string, string]>(
+        "SELECT id, type FROM chats WHERE platform = ? AND platform_id = ?"
       ).get(platform, box.id);
 
       if (exists) {
@@ -327,14 +326,19 @@ async function coldStartAdapter(platform: string): Promise<void> {
         `).run(
           platform,
           box.id,
-          isGroup ? "group" : "direct",
+          contactName ? "direct" : "group",
           contactName?.display_name ?? null,
           box.lastDeliveredTime || null,
         );
       }
     }
   } catch (err) {
-    console.error(`[daemon] [${platform}] get_message_boxes failed:`, err instanceof Error ? err.message : err);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg.includes("-32601") || errMsg.includes("Method not found")) {
+      console.error(`[daemon] [${platform}] get_message_boxes not supported (optional), skipping`);
+    } else {
+      console.error(`[daemon] [${platform}] get_message_boxes failed:`, errMsg);
+    }
   }
 
   await backfillAdapter(platform);

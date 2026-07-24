@@ -141,25 +141,28 @@ Unit test 用 mock 隔離每一層，但 mock 恰好隱藏了跨層串接的 bug
 
 ### 為什麼 gate
 
-Live test 需要：真實平台登入 session、平台 device slot（LINE 的 IOSIPAD slot 只能一個 client）、安全的 send target。不能進 CI，手動觸發。
+Live test 需要：真實平台登入 session、安全的 send target。不能進 CI，手動觸發。
+
+**Per-platform 注意事項**：
+- **LINE**：IOSIPAD device slot 只能一個 client，跑 live test 前必須停 chatmux daemon 和 line-tui
+- **Telegram**：MTProto session 是 SQLite 檔，兩個 process 同時開會 `database is locked`，跑 live test 前必須停 chatmux daemon
 
 ### Gating 機制
 
 | 環境變數 | 必要性 | 說明 |
 |---------|--------|------|
 | `CHATMUX_LIVE_TEST` | 必要 | 設為 `1` 啟用，未設或其他值 → `describe.skipIf` 跳過 |
-| `CHATMUX_TEST_CHAT_ID` | 必要 | Send target MID（帶 platform prefix，如 `line:u1234...`）。每個平台的取得方式不同，spike 時取得後填入 |
+| `CHATMUX_TEST_CHAT_ID` | 必要 | Send target（帶 platform prefix，如 `line:u1234...` 或 `telegram:123456789`）。推薦用 self-id（send-to-self） |
 | `CHATMUX_DATA_DIR` | 選填 | 預設 `~/.local/share/chatmux`。需含有效的 auth session |
 
 ### 跑法
 
 ```bash
-# 前置：停其他佔用 device slot 的 client
-systemctl --user stop chatmux          # chatmux daemon（有 Restart=on-failure，必須 stop 不能 kill）
-pgrep -f 'line-tui' && kill $(pgrep -f 'line-tui')  # line-tui（前景 TUI，手動終止）
+# 前置：停 chatmux daemon（避免 session 衝突）
+systemctl --user stop chatmux
 
 # 跑 live test（timeout 加長，等平台登入）
-CHATMUX_TEST_CHAT_ID=line:<your-mid> CHATMUX_LIVE_TEST=1 bun test tests/integration/ --timeout 180000
+CHATMUX_TEST_CHAT_ID=<platform>:<your-id> CHATMUX_LIVE_TEST=1 bun test tests/integration/ --timeout 180000
 
 # 完成後恢復
 systemctl --user start chatmux
@@ -172,12 +175,37 @@ systemctl --user start chatmux
 3. **Setup**（`beforeAll`）：
    - 驗證 `CHATMUX_TEST_CHAT_ID` env 存在（必要參數，不自動發現）
    - 建立 `SafetyRail`（用預設值）
-   - 建立 `AdapterRunner`：自行實作 `spawn` callback，參考 `daemon.ts` 的 wiring pattern（stdin/stdout pipe、stderr inherit、cwd 設為專案根目錄）
+   - 建立 `AdapterRunner`，spawn callback 範例：
+     ```typescript
+     import { spawn } from "node:child_process";
+     import { resolve } from "node:path";
+     import type { SpawnResult } from "../src/core/adapter-runner.js";
+
+     const spawnAdapter = (cmd: string[]): SpawnResult => {
+       const proc = spawn(cmd[0], cmd.slice(1), {
+         stdio: ["pipe", "pipe", "inherit"],
+         cwd: resolve(import.meta.dir, ".."),   // 專案根目錄
+         env: { ...process.env },                // 繼承 env（含 adapters.json 的 env merge）
+       });
+       const exitListeners: ((code: number) => void)[] = [];
+       proc.on("exit", (code) => {
+         for (const fn of exitListeners) fn(code ?? 1);
+       });
+       return {
+         stdin: proc.stdin!,
+         stdout: proc.stdout!,
+         stderr: proc.stderr!,
+         pid: proc.pid!,
+         kill: () => proc.kill(),
+         onExit: (fn: (code: number) => void) => { exitListeners.push(fn); },
+       };
+     };
+     ```
    - `runner.start()` 只等 `initialize` RPC，不等平台登入。等 `status: "connected"` notification 才算就緒
    - 設 120 秒 connected timeout（平台登入可能需要時間）
 4. **選安全 send target**：透過 `CHATMUX_TEST_CHAT_ID` env 指定。推薦用自身帳號（send-to-self）或專用 test group，避免騷擾真人。每個平台的 self-id 取得方式不同，spike 時取得後填入 env
 5. **Test case**：呼叫 `handleSendMessage(deps, { chat_id: "<platform>:<target>", text: "..." })`
-   - `chat_id` 帶 platform prefix（驗證 prefix strip）
+   - `chat_id` 帶 platform prefix
    - `deps.sendToAdapter` 接 `runner.sendRequest`
    - `deps.isAdapterConnected` 回 `true`（已等 connected）
 6. **斷言**：`result.success === true`、`result.message_id` 存在且非空、`result.timestamp` 是數字
@@ -191,5 +219,6 @@ tests/
 ├── core/           # unit tests（mock 邊界）
 ├── adapters/       # unit tests（mock 邊界）
 └── integration/    # live integration tests（env-gated，真實平台 API）
-    └── line-send.test.ts
+    ├── line-send.test.ts
+    └── telegram-send.test.ts
 ```

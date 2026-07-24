@@ -237,8 +237,11 @@ export async function handleSendMessage(
   await deps.safetyRail.rateLimiter.acquire();
 
   try {
+    const [, ...platformIdParts] = params.chat_id.split(":");
+    const rawPlatformId = platformIdParts.join(":");
+
     const result = await deps.sendToAdapter("send_message", {
-      chat_id: params.chat_id,
+      chat_id: rawPlatformId,
       content: { type: "text", text: params.text },
     }) as { message_id?: string; timestamp?: number };
 

@@ -5,22 +5,22 @@ chatmux 是三層拓撲：**Adapter**（連接 IM 平台）→ **Core Daemon**�
 ## 三層拓撲
 
 ```
-┌─────────────┐      stdio JSON-RPC      ┌──────────────────────────────────┐      MCP Streamable HTTP      ┌──────────────┐
-│ LINE Adapter │ ◄──────────────────────► │         Core Daemon              │ ◄────────────────────────── │ Claude Code  │
-│ (Node+tsx)   │   child process          │                                  │   unix socket               │ (MCP client)  │
-│              │   stdin/stdout           │  ┌──────────┐  ┌─────────────┐  │   ~/.local/share/chatmux/   │              │
-└─────────────┘                          │  │ Storage   │  │ SafetyRail  │  │   chatmux.sock              └──────────────┘
-                                          │  │ JSONL+SQL │  │ Rate+Error  │  │
-                                          │  └──────────┘  │ +KillSwitch │  │
-                                          │                 └─────────────┘  │
-                                          │  ┌──────────────┐               │
-                                          │  │ Adapter Runner│               │
-                                          │  │ spawn/watch   │               │
-                                          │  └──────────────┘               │
-                                          │  ┌──────────────┐               │
-                                          │  │ MCP Server    │               │
-                                          │  │ tools+resources│              │
-                                          │  └──────────────┘               │
+┌─────────────┐                          ┌──────────────────────────────────┐      MCP Streamable HTTP      ┌──────────────┐
+│ LINE Adapter │      stdio JSON-RPC      │         Core Daemon              │ ◄────────────────────────── │ Claude Code  │
+│ (Node+tsx)   │ ◄──────────────────────► │                                  │   unix socket               │ (MCP client)  │
+└─────────────┘   child process          │  ┌──────────┐  ┌─────────────┐  │   ~/.local/share/chatmux/   │              │
+                   stdin/stdout           │  │ Storage   │  │ SafetyRail  │  │   chatmux.sock              └──────────────┘
+┌──────────────┐                         │  │ JSONL+SQL │  │ Rate+Error  │  │
+│ Telegram     │      stdio JSON-RPC      │  └──────────┘  │ +KillSwitch │  │
+│ Adapter      │ ◄──────────────────────► │                 └─────────────┘  │
+│ (Python)     │   child process          │  ┌──────────────┐               │
+└──────────────┘   stdin/stdout           │  │AdapterManager │               │
+                                          │  │ config+routing│               │
+┌──────────────┐                         │  └──────────────┘               │
+│ Future       │      stdio JSON-RPC      │  ┌──────────────┐               │
+│ Adapter      │ ◄ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─► │  │ MCP Server    │               │
+│ (any lang)   │   child process          │  │ tools+resources│              │
+└──────────────┘                          │  └──────────────┘               │
                                           └──────────────────────────────────┘
 ```
 
@@ -30,6 +30,7 @@ chatmux 是三層拓撲：**Adapter**（連接 IM 平台）→ **Core Daemon**�
 |------|---------|---------|------|
 | Core Daemon | Bun | 主程序 | bun:sqlite 原生綁定、快速啟動、MCP Streamable HTTP 零 config |
 | LINE Adapter | Node + tsx | 子程序（child process） | LEGY Push 需 HTTP/2 duplex，Bun 不支援 |
+| Telegram Adapter | Python (Telethon) | 子程序（child process） | MTProto user session，獨立 repo |
 | MCP Server | Bun | 與 Core 同程序 | 直接存取 Storage，無 IPC 開銷 |
 | Future adapters | 任意 runtime | 子程序 | stdio JSON-RPC 是語言無關協議 |
 
@@ -96,22 +97,22 @@ SafetyRail 攔截:
   → KillSwitch 觸發（3 次） → 斷開 adapter 連線，需手動 reset
 ```
 
-### 冷啟動流程（空 DB 首次啟動）
+### 冷啟動流程
 
 ```
 Daemon 啟動
   → Storage 初始化（建表、JSONL sync check）
   → SafetyRail 初始化
-  → Adapter Runner spawn LINE Adapter
-  → LINE Adapter initialize → 回報 capabilities + platform_rate_limits
-  → Core 等待 adapter status "connected" 通知（120s timeout）
-  → Core 取 SafetyRail 預設 vs platform 回報的嚴者
-  → get_contacts → contacts 寫入 Storage
-  → get_chats → chats 寫入 Storage
-  → get_message_boxes → 發現 1:1 chats 補入 chats 表
-  → backfill: 按 last_message_time 降序逐 chat 取 50 筆/輪
-    → 全域計數器達 500 即停（不等遍歷完所有 chat）
-    → 若首輪未達 500 且仍有 chat 未見底則再輪
+  → AdapterManager 讀 adapters.json → 對每個 enabled adapter spawn 子程序
+  → 各 adapter initialize → 回報 capabilities + platform_rate_limits
+  → Core 等待各 adapter status "connected" 通知（120s timeout）
+  → 對每個 connected adapter:
+    → get_contacts → contacts 寫入 Storage
+    → get_chats → chats 寫入 Storage
+    → get_message_boxes (optional, skip on -32601) → 補充 chats 的 lastDeliveredTime
+    → backfill: 按 last_message_time 降序逐 chat 取 50 筆/輪
+      → 全域計數器達 500 即停（不等遍歷完所有 chat）
+      → 若首輪未達 500 且仍有 chat 未見底則再輪
   → MCP Server 啟動
   → 開始監聽 live push events
 ```
@@ -130,13 +131,16 @@ Daemon 啟動
 
 ```
 ~/.local/share/chatmux/           # $CHATMUX_DATA_DIR
+├── adapters.json                  # Adapter 配置（見 adapter-protocol.md）
 ├── chatmux.sock                   # MCP unix socket
 ├── events.jsonl                   # JSONL truth source (append-only)
 ├── chatmux.db                     # SQLite query view
 ├── media/                         # 下載的圖片/影片/音訊
 │   └── line/                      # 按平台分目錄
-└── adapters/
-    └── line/
-        ├── auth.json              # authToken（首次 QR 登入後持久化）
-        └── storage.json           # E2EE key storage
+└── adapters/                      # 各 adapter 的平台資料
+    ├── line/
+    │   ├── auth.json              # authToken（首次 QR 登入後持久化）
+    │   └── storage.json           # E2EE key storage
+    └── telegram/
+        └── chatmux.session        # Telethon SQLite session
 ```
