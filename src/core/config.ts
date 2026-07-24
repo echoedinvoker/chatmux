@@ -17,6 +17,43 @@ interface RawAdapterEntry {
   enabled?: boolean;
 }
 
+/** Default TCP port for the MCP Streamable HTTP listener (bound to 127.0.0.1 only). */
+export const DEFAULT_MCP_PORT = 7717;
+
+/**
+ * Resolve the MCP TCP port.
+ *
+ * Precedence: `CHATMUX_MCP_PORT` env > `adapters.json` `mcp.port` > DEFAULT_MCP_PORT.
+ * `0` disables the TCP listener, leaving only the unix socket.
+ */
+export function loadMcpPort(dataDir: string): number {
+  const fromEnv = process.env.CHATMUX_MCP_PORT;
+  if (fromEnv !== undefined && fromEnv.trim() !== "") {
+    return parsePort(fromEnv, "CHATMUX_MCP_PORT");
+  }
+
+  const configPath = join(dataDir, "adapters.json");
+  if (existsSync(configPath)) {
+    const raw = JSON.parse(readFileSync(configPath, "utf-8"));
+    const port = raw?.mcp?.port;
+    if (port !== undefined && port !== null) {
+      return parsePort(port, "adapters.json: mcp.port");
+    }
+  }
+
+  return DEFAULT_MCP_PORT;
+}
+
+function parsePort(value: unknown, source: string): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(
+      `${source}: must be an integer 0-65535 (0 disables the TCP listener), got ${JSON.stringify(value)}`,
+    );
+  }
+  return n;
+}
+
 export function loadAdapterConfigs(dataDir: string): AdapterConfig[] {
   const configPath = join(dataDir, "adapters.json");
 

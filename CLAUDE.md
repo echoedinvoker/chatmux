@@ -19,7 +19,7 @@ AI clients (Claude Code). Not a chat app — no UI, pure data layer.
 - `src/core/storage/sqlite.ts` — SQLite schema + JSONL→SQLite sync (query view)
 - `src/core/storage/fts.ts` — FTS5 bigram+trigram setup + sync triggers
 - `src/core/storage/query.ts` — High-level queries: search, paginated read, stats
-- `src/core/mcp/server.ts` — MCP Streamable HTTP on unix socket
+- `src/core/mcp/server.ts` — MCP Streamable HTTP on loopback TCP + unix socket (shared handler)
 - `src/core/mcp/tools.ts` — 5 MCP tools (list_chats, read_messages, search_messages, send_message, get_status)
 - `src/core/mcp/resources.ts` — 4 MCP resources + subscription
 - `src/adapters/line/` — LINE adapter (Node+tsx, NOT Bun — LEGY Push needs HTTP/2)
@@ -31,14 +31,17 @@ AI clients (Claude Code). Not a chat app — no UI, pure data layer.
 
 ```
 LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Streamable HTTP ──→ Claude Code
-(child process)                      ├─ SafetyRail    (unix socket)
+(child process)                      ├─ SafetyRail  (127.0.0.1 TCP / unix socket)
                                      ├─ Storage (JSONL → SQLite/FTS5)
                                      ├─ Adapter Runner
                                      └─ MCP Server
 ```
 
 - Core = main process (Bun). Adapter = child process (Node+tsx). MCP server = same process as core.
-- Two communication boundaries: adapter↔core (stdio JSON-RPC), core↔consumer (MCP Streamable HTTP over unix socket).
+- Two communication boundaries: adapter↔core (stdio JSON-RPC), core↔consumer (MCP Streamable HTTP).
+- Core↔consumer runs **two listeners sharing one handler + session map**: loopback TCP for standard MCP
+  clients (Claude Code — the MCP spec has no unix socket transport), unix socket for same-host sidecars
+  (chat.nvim). Adding one must never break the other; `tests/core/mcp-server.test.ts` guards both.
 
 ## Pattern Selection
 
@@ -86,6 +89,7 @@ Two independent ErrorTracker+KillSwitch instances:
 |----------|---------|---------|
 | `CHATMUX_DATA_DIR` | `~/.local/share/chatmux` | Data directory (JSONL, SQLite, media, auth) |
 | `CHATMUX_SOCKET` | `$CHATMUX_DATA_DIR/chatmux.sock` | MCP unix socket path |
+| `CHATMUX_MCP_PORT` | `7717` | MCP TCP port, bound to 127.0.0.1 only. `0` disables. Overrides `mcp.port` in `adapters.json` |
 | `CHATMUX_LOG_LEVEL` | `info` | Log level |
 | `CHATMUX_LIVE_TEST` | (unset) | Set to `1` to enable live integration tests (see `docs/testing.md`) |
 | `CHATMUX_TEST_CHAT_ID` | (unset) | Send target MID for live tests, e.g. `line:u1234...` |

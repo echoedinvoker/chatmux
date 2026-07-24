@@ -1,4 +1,9 @@
-import { createServer, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { randomUUID } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -14,8 +19,18 @@ export interface McpServerDeps {
   registerResources: (server: McpServer) => void;
 }
 
+export interface McpListenOptions {
+  /** Unix socket path — for same-host sidecar/plugin consumers (e.g. chat.nvim). */
+  socketPath: string;
+  /**
+   * TCP port bound to 127.0.0.1 — for standard MCP clients (Claude Code), which
+   * only speak stdio or streamable HTTP. Omit or set 0 to disable.
+   */
+  port?: number;
+}
+
 export async function startMcpServer(
-  socketPath: string,
+  listen: McpListenOptions,
   deps: McpServerDeps,
 ): Promise<() => void> {
   const sessions = new Map<string, Session>();
@@ -30,7 +45,12 @@ export async function startMcpServer(
     return server;
   }
 
-  const httpServer: Server = createServer(async (req, res) => {
+  // Named handler so every listener (unix socket + TCP) shares one request path
+  // and one `sessions` map.
+  async function handleMcpRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/mcp") {
       res.writeHead(404);
@@ -84,19 +104,48 @@ export async function startMcpServer(
         res.end("Internal server error");
       }
     }
-  });
+  }
+
+  const { socketPath, port } = listen;
+  const listeners: Server[] = [];
 
   if (existsSync(socketPath)) unlinkSync(socketPath);
 
+  const unixServer = createServer(handleMcpRequest);
+  await listenOn(unixServer, socketPath);
+  listeners.push(unixServer);
+  console.error(`[MCP] listening on unix socket ${socketPath}`);
+
+  if (port && port > 0) {
+    const tcpServer = createServer(handleMcpRequest);
+    // Loopback only — never bind the wildcard address; this exposes all chat history.
+    await listenOn(tcpServer, { port, host: "127.0.0.1" });
+    listeners.push(tcpServer);
+    console.error(`[MCP] listening on http://127.0.0.1:${port}/mcp`);
+  }
+
+  return () => {
+    for (const l of listeners) l.close();
+    for (const s of sessions.values()) s.server.close();
+    sessions.clear();
+  };
+}
+
+function listenOn(
+  server: Server,
+  target: string | { port: number; host: string },
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    httpServer.on("error", reject);
-    httpServer.listen(socketPath, () => {
-      console.error(`[MCP] server listening on ${socketPath}`);
-      resolve(() => {
-        httpServer.close();
-        for (const s of sessions.values()) s.server.close();
-        sessions.clear();
-      });
-    });
+    const onStartupError = (err: Error) => reject(err);
+    server.once("error", onStartupError);
+
+    const onListening = () => {
+      server.removeListener("error", onStartupError);
+      server.on("error", (err) => console.error("[MCP] server error:", err));
+      resolve();
+    };
+
+    if (typeof target === "string") server.listen(target, onListening);
+    else server.listen(target.port, target.host, onListening);
   });
 }

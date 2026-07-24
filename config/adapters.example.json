@@ -1,4 +1,8 @@
 {
+  "mcp": {
+    "_comment": "TCP port for standard MCP clients (Claude Code). Bound to 127.0.0.1 only. 0 disables it, leaving the unix socket. Overridden by CHATMUX_MCP_PORT.",
+    "port": 7717
+  },
   "adapters": [
     {
       "platform": "line",

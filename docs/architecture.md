@@ -7,7 +7,7 @@ chatmux 是三層拓撲：**Adapter**（連接 IM 平台）→ **Core Daemon**�
 ```
 ┌─────────────┐                          ┌──────────────────────────────────┐      MCP Streamable HTTP      ┌──────────────┐
 │ LINE Adapter │      stdio JSON-RPC      │         Core Daemon              │ ◄────────────────────────── │ Claude Code  │
-│ (Node+tsx)   │ ◄──────────────────────► │                                  │   unix socket               │ (MCP client)  │
+│ (Node+tsx)   │ ◄──────────────────────► │                                  │  127.0.0.1 TCP / unix sock  │ (MCP client)  │
 └─────────────┘   child process          │  ┌──────────┐  ┌─────────────┐  │   ~/.local/share/chatmux/   │              │
                    stdin/stdout           │  │ Storage   │  │ SafetyRail  │  │   chatmux.sock              └──────────────┘
 ┌──────────────┐                         │  │ JSONL+SQL │  │ Rate+Error  │  │
@@ -55,7 +55,13 @@ chatmux 是三層拓撲：**Adapter**（連接 IM 平台）→ **Core Daemon**�
 
 ### Core ↔ Consumer：MCP Streamable HTTP
 
-HTTP/1.1 + SSE over unix socket（`$CHATMUX_SOCKET`，預設 `~/.local/share/chatmux/chatmux.sock`）：
+HTTP/1.1 + SSE，**同時開兩個 listener、共用同一組 handler 與 session map**：
+
+- **TCP** `127.0.0.1:<port>`（`CHATMUX_MCP_PORT` / `adapters.json` 的 `mcp.port`，預設 `7717`；`0` 停用）
+  ——給標準 MCP client（Claude Code）。MCP spec 只定義 stdio 與 streamable HTTP，**沒有 unix socket transport**。
+- **Unix socket** `$CHATMUX_SOCKET`（預設 `~/.local/share/chatmux/chatmux.sock`）
+  ——給同機 sidecar / plugin consumer（chat.nvim）。
+
 
 | 方向 | 類型 | 語義 |
 |------|------|------|
@@ -132,7 +138,7 @@ Daemon 啟動
 ```
 ~/.local/share/chatmux/           # $CHATMUX_DATA_DIR
 ├── adapters.json                  # Adapter 配置（見 adapter-protocol.md）
-├── chatmux.sock                   # MCP unix socket
+├── chatmux.sock                   # MCP unix socket (TCP listener has no file)
 ├── events.jsonl                   # JSONL truth source (append-only)
 ├── chatmux.db                     # SQLite query view
 ├── media/                         # 下載的圖片/影片/音訊

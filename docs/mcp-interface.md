@@ -1,28 +1,49 @@
 # MCP Interface
 
-chatmux 透過 MCP Streamable HTTP（unix socket）暴露 5 個 tools + 4 個 resources + resource subscription。
+chatmux 透過 MCP Streamable HTTP 暴露 5 個 tools + 4 個 resources + resource subscription，**同時開兩個 listener**。
 
 ## 傳輸
 
 - **Protocol**：MCP Streamable HTTP（HTTP/1.1 + SSE）
-- **Transport**：unix socket（`$CHATMUX_SOCKET`，預設 `~/.local/share/chatmux/chatmux.sock`）
 - **SDK**：`@modelcontextprotocol/sdk`
+
+兩個 listener 共用同一組 handler 與 session 狀態，功能完全一致，差別只在誰連得上：
+
+| Listener | 位址 | 給誰用 | 為什麼 |
+|----------|------|--------|--------|
+| **Unix socket** | `$CHATMUX_SOCKET`（預設 `~/.local/share/chatmux/chatmux.sock`） | 同機的 sidecar / plugin consumer（如 chat.nvim 的 Bun sidecar） | 檔案權限即存取控制；Bun 的 `fetch({ unix })` 直接支援 |
+| **TCP** | `127.0.0.1:<port>`（預設 `7717`） | 標準 MCP client（Claude Code 等） | **MCP spec 只定義 stdio 與 streamable HTTP 兩種 transport，不含 unix socket** |
+
+> ⚠️ **不要把 unix socket 路徑餵給 Claude Code**。MCP 設定沒有 `socketPath` 這個欄位——client 只接受 stdio（`command`/`args`）或 streamable HTTP 的 TCP `url`。這是 spec 層級的限制，不是實作缺漏。
 
 ### Claude Code 設定
 
-```json
-{
-  "mcpServers": {
-    "chatmux": {
-      "url": "http://localhost/mcp",
-      "transport": {
-        "type": "streamable-http",
-        "socketPath": "/home/user/.local/share/chatmux/chatmux.sock"
-      }
-    }
-  }
-}
+```bash
+claude mcp add --transport http chatmux http://127.0.0.1:7717/mcp
 ```
+
+驗證連線：
+
+```bash
+claude mcp list
+# chatmux: http://127.0.0.1:7717/mcp (HTTP) - ✔ Connected
+```
+
+### TCP port 設定
+
+優先序：環境變數 > 設定檔 > 預設值。
+
+| 來源 | 形式 | 備註 |
+|------|------|------|
+| `CHATMUX_MCP_PORT` | 環境變數 | 最高優先 |
+| `adapters.json` 的 `mcp.port` | `{ "mcp": { "port": 7717 }, "adapters": [...] }` | 次之 |
+| 預設 | `7717` | 都沒設定時 |
+
+設 `0` 可**停用 TCP listener**，只留 unix socket。
+
+值不合法（非整數、超出 `0-65535`）時 daemon 直接啟動失敗，不會安靜退回預設值。
+
+**安全性**：TCP listener 只綁 `127.0.0.1`，永不綁 wildcard——聊天全文都在這條線上。但要注意 loopback 沒有 unix socket 的檔案權限保護：**同機任何 process 都連得上**。多使用者主機或不信任同機程式時，設 `mcp.port: 0` 關掉 TCP，改用 unix socket。
 
 ## Tools
 

@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadAdapterConfigs, type AdapterConfig } from "../../src/core/config.js";
+import {
+  loadAdapterConfigs,
+  loadMcpPort,
+  DEFAULT_MCP_PORT,
+  type AdapterConfig,
+} from "../../src/core/config.js";
 
 const TEST_DIR = join(import.meta.dir, "../../.test-config-tmp");
 
@@ -117,5 +122,65 @@ describe("loadAdapterConfigs", () => {
 
     const configs = loadAdapterConfigs(TEST_DIR);
     expect(configs[0].env).toBeUndefined();
+  });
+});
+
+describe("loadMcpPort", () => {
+  const savedEnv = process.env.CHATMUX_MCP_PORT;
+
+  beforeEach(() => {
+    mkdirSync(TEST_DIR, { recursive: true });
+    delete process.env.CHATMUX_MCP_PORT;
+  });
+
+  afterEach(() => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    if (savedEnv === undefined) delete process.env.CHATMUX_MCP_PORT;
+    else process.env.CHATMUX_MCP_PORT = savedEnv;
+  });
+
+  it("falls back to the default port when nothing is configured", () => {
+    expect(loadMcpPort(TEST_DIR)).toBe(DEFAULT_MCP_PORT);
+  });
+
+  it("reads mcp.port from adapters.json", () => {
+    writeConfig({ adapters: [], mcp: { port: 9123 } });
+    expect(loadMcpPort(TEST_DIR)).toBe(9123);
+  });
+
+  it("env var overrides adapters.json", () => {
+    writeConfig({ adapters: [], mcp: { port: 9123 } });
+    process.env.CHATMUX_MCP_PORT = "9999";
+    expect(loadMcpPort(TEST_DIR)).toBe(9999);
+  });
+
+  it("env var overrides the default when no config file exists", () => {
+    process.env.CHATMUX_MCP_PORT = "9999";
+    expect(loadMcpPort(TEST_DIR)).toBe(9999);
+  });
+
+  it("ignores an empty env var and falls through", () => {
+    process.env.CHATMUX_MCP_PORT = "";
+    expect(loadMcpPort(TEST_DIR)).toBe(DEFAULT_MCP_PORT);
+  });
+
+  it("accepts 0 to disable the TCP listener", () => {
+    writeConfig({ adapters: [], mcp: { port: 0 } });
+    expect(loadMcpPort(TEST_DIR)).toBe(0);
+  });
+
+  it("throws on a non-numeric port instead of silently defaulting", () => {
+    process.env.CHATMUX_MCP_PORT = "not-a-port";
+    expect(() => loadMcpPort(TEST_DIR)).toThrow(/CHATMUX_MCP_PORT/);
+  });
+
+  it("throws on an out-of-range port", () => {
+    writeConfig({ adapters: [], mcp: { port: 70000 } });
+    expect(() => loadMcpPort(TEST_DIR)).toThrow(/0-65535/);
+  });
+
+  it("ignores mcp.port absence in an otherwise valid config", () => {
+    writeConfig({ adapters: [{ platform: "line", command: "node", args: ["a.ts"] }] });
+    expect(loadMcpPort(TEST_DIR)).toBe(DEFAULT_MCP_PORT);
   });
 });

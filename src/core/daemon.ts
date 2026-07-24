@@ -11,7 +11,7 @@ import { initFTS } from "./storage/fts.js";
 import { SafetyRail } from "./safety.js";
 import type { SpawnResult } from "./adapter-runner.js";
 import { AdapterManager } from "./adapter-manager.js";
-import { loadAdapterConfigs } from "./config.js";
+import { loadAdapterConfigs, loadMcpPort } from "./config.js";
 import { startMcpServer } from "./mcp/server.js";
 import {
   handleListChats,
@@ -31,8 +31,13 @@ const socketPath =
 
 mkdirSync(dataDir, { recursive: true });
 
+const mcpPort = loadMcpPort(dataDir);
+
 console.error(`[daemon] data dir: ${dataDir}`);
 console.error(`[daemon] socket: ${socketPath}`);
+console.error(
+  `[daemon] mcp tcp: ${mcpPort > 0 ? `127.0.0.1:${mcpPort}` : "disabled (unix socket only)"}`,
+);
 
 const jsonlPath = join(dataDir, "events.jsonl");
 const dbPath = join(dataDir, "chatmux.db");
@@ -465,7 +470,10 @@ async function main(): Promise<void> {
   }
 
   console.error("[daemon] starting MCP server...");
-  const closeMcp = await startMcpServer(socketPath, { registerTools, registerResources });
+  const closeMcp = await startMcpServer(
+    { socketPath, port: mcpPort },
+    { registerTools, registerResources },
+  );
   console.error("[daemon] MCP server started");
 
   const shutdown = async (signal: string) => {

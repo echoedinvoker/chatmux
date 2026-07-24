@@ -23,27 +23,26 @@ bun run start
 
 ### 3. Connect Claude Code
 
-Add to your Claude Code MCP settings (`~/.claude/settings.json` or project settings):
+Register the daemon's MCP endpoint with Claude Code:
 
-```json
-{
-  "mcpServers": {
-    "chatmux": {
-      "url": "http://localhost/mcp",
-      "transport": {
-        "type": "streamable-http",
-        "socketPath": "/home/<user>/.local/share/chatmux/chatmux.sock"
-      }
-    }
-  }
-}
+```bash
+claude mcp add --transport http chatmux http://127.0.0.1:7717/mcp
+claude mcp list   # chatmux: ... - ✔ Connected
 ```
+
+The daemon listens on two transports at once: a **TCP port on `127.0.0.1`** (default `7717`) for
+standard MCP clients like Claude Code, and a **unix socket** for same-host sidecar consumers like
+[chat.nvim](https://github.com/echoedinvoker/chat.nvim). Use the TCP url for Claude Code — the MCP
+spec only defines stdio and streamable HTTP transports, so no MCP client accepts a unix socket path.
+
+Port is configurable via `CHATMUX_MCP_PORT`, or `mcp.port` in `adapters.json`; set it to `0` to
+disable the TCP listener. See [docs/mcp-interface.md](docs/mcp-interface.md).
 
 ## Architecture
 
 ```
 LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Streamable HTTP ──→ Claude Code
-(Node+tsx)        (child process)    (Bun)            (unix socket)           (MCP client)
+(Node+tsx)        (child process)    (Bun)         (127.0.0.1 TCP / unix)     (MCP client)
                                      ├─ SafetyRail
                                      ├─ Storage (JSONL → SQLite/FTS5)
                                      ├─ Adapter Runner
@@ -53,7 +52,7 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 - **Core daemon** (Bun): central process managing storage, safety, and MCP server
 - **LINE adapter** (Node+tsx): child process connecting to LINE via IOSIPAD slot
 - **Storage**: JSONL append-only truth source + SQLite/FTS5 queryable view
-- **MCP server**: Streamable HTTP over unix socket, 5 tools + 4 resources
+- **MCP server**: Streamable HTTP over loopback TCP (standard MCP clients) + unix socket (same-host sidecars), 5 tools + 4 resources
 
 ## MCP Tools
 
