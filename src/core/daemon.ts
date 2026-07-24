@@ -9,7 +9,9 @@ import { JsonlWriter, type JsonlEvent } from "./storage/jsonl.js";
 import { initSchema, syncEventToSQLite } from "./storage/sqlite.js";
 import { initFTS } from "./storage/fts.js";
 import { SafetyRail } from "./safety.js";
-import { AdapterRunner, type SpawnResult } from "./adapter-runner.js";
+import type { SpawnResult } from "./adapter-runner.js";
+import { AdapterManager } from "./adapter-manager.js";
+import { loadAdapterConfigs } from "./config.js";
 import { startMcpServer } from "./mcp/server.js";
 import {
   handleListChats,
@@ -46,45 +48,42 @@ syncCheck();
 const safety = new SafetyRail();
 const subscriptions = new ResourceSubscriptionManager();
 
-let adapterConnected = false;
-let adapterStartTime = 0;
-let adapterConnectedResolve: (() => void) | null = null;
-const adapterConnectedPromise = new Promise<void>((resolve) => {
-  adapterConnectedResolve = resolve;
-});
+const adapterConfigs = loadAdapterConfigs(dataDir);
+console.error(`[daemon] loaded ${adapterConfigs.length} adapter config(s): ${adapterConfigs.map(c => c.platform).join(", ")}`);
 
-const runner = new AdapterRunner({
-  command: ["node", "--import", "tsx", resolve(import.meta.dir, "../adapters/line/index.ts")],
-  platform: "line",
+const manager = new AdapterManager(adapterConfigs, {
   dataDir,
-  spawn: (cmd) => {
-    const proc = spawn(cmd[0], cmd.slice(1), {
-      stdio: ["pipe", "pipe", "inherit"],
-      cwd: resolve(import.meta.dir, "../.."),
-    });
-    const exitListeners: ((code: number) => void)[] = [];
-    proc.on("exit", (code) => {
-      adapterConnected = false;
-      for (const fn of exitListeners) fn(code ?? 1);
-    });
-    return {
-      stdin: proc.stdin!,
-      stdout: proc.stdout!,
-      stderr: proc.stderr!,
-      pid: proc.pid!,
-      kill: () => proc.kill(),
-      onExit: (fn: (code: number) => void) => { exitListeners.push(fn); },
-    } satisfies SpawnResult;
-  },
   safetyRail: safety,
+  spawn: (platform) => {
+    const config = adapterConfigs.find(c => c.platform === platform)!;
+    return (cmd) => {
+      const proc = spawn(cmd[0], cmd.slice(1), {
+        stdio: ["pipe", "pipe", "inherit"],
+        cwd: config.cwd ?? resolve(import.meta.dir, "../.."),
+        env: config.env ? { ...process.env, ...config.env } : undefined,
+      });
+      const exitListeners: ((code: number) => void)[] = [];
+      proc.on("exit", (code) => {
+        for (const fn of exitListeners) fn(code ?? 1);
+      });
+      return {
+        stdin: proc.stdin!,
+        stdout: proc.stdout!,
+        stderr: proc.stderr!,
+        pid: proc.pid!,
+        kill: () => proc.kill(),
+        onExit: (fn: (code: number) => void) => { exitListeners.push(fn); },
+      } satisfies SpawnResult;
+    };
+  },
 });
 
-runner.onEvent(async (params: unknown) => {
+manager.onEvent(async (platform: string, params: unknown) => {
   const event = params as JsonlEvent;
   event.source = "live";
   event.received_at = Date.now();
   if (!event.sender.display_name) {
-    console.error("[daemon] WARN: event missing display_name", event.sender.platform_id);
+    console.error(`[daemon] WARN: event missing display_name`, event.sender.platform_id);
   }
 
   try {
@@ -94,32 +93,19 @@ runner.onEvent(async (params: unknown) => {
     const chatCompositeId = `${event.platform}:${event.chat.platform_id}`;
     subscriptions.notifyMessageReceived(chatCompositeId);
 
-    console.error(`[daemon] event: ${event.content.type} from ${event.sender.display_name}`);
+    console.error(`[daemon] [${platform}] event: ${event.content.type} from ${event.sender.display_name}`);
   } catch (err) {
-    console.error("[daemon] event processing error:", err);
+    console.error(`[daemon] [${platform}] event processing error:`, err);
   }
 });
 
-runner.onStatus((params) => {
+manager.onStatus((platform: string, params: unknown) => {
   const status = params as { state: string };
-  console.error(`[daemon] adapter status: ${status.state}`);
-  if (status.state === "connected") {
-    adapterConnected = true;
-    adapterStartTime = Date.now();
-    if (adapterConnectedResolve) {
-      adapterConnectedResolve();
-      adapterConnectedResolve = null;
-    }
-  }
+  console.error(`[daemon] [${platform}] adapter status: ${status.state}`);
 });
 
-runner.onError((params) => {
-  console.error("[daemon] adapter error:", params);
-});
-
-runner.onKill(() => {
-  console.error("[daemon] adapter killed after repeated crashes");
-  adapterConnected = false;
+manager.onError((platform: string, params: unknown) => {
+  console.error(`[daemon] [${platform}] adapter error:`, params);
 });
 
 function registerTools(server: McpServer): void {
@@ -127,7 +113,7 @@ function registerTools(server: McpServer): void {
     "list_chats",
     "List all chats with last message preview",
     {
-      platform: z.string().optional().describe("Filter by platform (e.g. 'line')"),
+      platform: z.string().optional().describe("Filter by platform (e.g. 'line', 'telegram')"),
       search: z.string().optional().describe("Search chat name"),
       limit: z.number().optional().default(50),
       offset: z.number().optional().default(0),
@@ -142,7 +128,7 @@ function registerTools(server: McpServer): void {
     "read_messages",
     "Read messages from a specific chat",
     {
-      chat_id: z.string().describe("Chat ID (e.g. 'line:c1234')"),
+      chat_id: z.string().describe("Chat ID (e.g. 'line:c1234', 'telegram:456')"),
       limit: z.number().optional().default(20),
       before: z.number().optional().describe("Messages before this timestamp (ms)"),
       after: z.number().optional().describe("Messages after this timestamp (ms)"),
@@ -173,14 +159,15 @@ function registerTools(server: McpServer): void {
     "send_message",
     "Send a message through an adapter (rate-limited by SafetyRail)",
     {
-      chat_id: z.string().describe("Target chat ID (e.g. 'line:c1234')"),
+      chat_id: z.string().describe("Target chat ID (e.g. 'line:c1234', 'telegram:456')"),
       text: z.string().describe("Message text to send"),
     },
     async ({ chat_id, text }) => {
+      const [platform] = chat_id.split(":");
       const deps: SendDeps = {
         safetyRail: safety,
-        sendToAdapter: (method, params) => runner.sendRequest(method, params),
-        isAdapterConnected: () => adapterConnected,
+        sendToAdapter: (method, params) => manager.sendRequest(platform, method, params),
+        isAdapterConnected: () => manager.isConnected(platform),
       };
       const result = await handleSendMessage(deps, { chat_id, text });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -194,16 +181,20 @@ function registerTools(server: McpServer): void {
     async () => {
       const dbSize = existsSync(dbPath) ? statSync(dbPath).size / (1024 * 1024) : 0;
       const jsonlSize = existsSync(jsonlPath) ? statSync(jsonlPath).size / (1024 * 1024) : 0;
-      const uptime = adapterConnected ? Math.floor((Date.now() - adapterStartTime) / 1000) : 0;
+
+      const adaptersStatus: Record<string, { state: string; uptime_seconds?: number; rate_limit?: { remaining: number; resets_in_seconds: number } }> = {};
+      const statuses = manager.getStatuses();
+      for (const [platform, status] of Object.entries(statuses)) {
+        const uptime = status.connected ? Math.floor((Date.now() - status.startTime) / 1000) : 0;
+        adaptersStatus[platform] = {
+          state: status.connected ? "connected" : manager.isKilled(platform) ? "killed" : "disconnected",
+          uptime_seconds: uptime,
+          rate_limit: { remaining: 5 - safety.rateLimiter.getCount(), resets_in_seconds: 60 },
+        };
+      }
 
       const result = handleGetStatus(db, {
-        adapters: {
-          line: {
-            state: adapterConnected ? "connected" : runner.isKilled ? "killed" : "disconnected",
-            uptime_seconds: uptime,
-            rate_limit: { remaining: 5 - safety.rateLimiter.getCount(), resets_in_seconds: 60 },
-          },
-        },
+        adapters: adaptersStatus,
         dbSizeMb: Math.round(dbSize * 100) / 100,
         jsonlSizeMb: Math.round(jsonlSize * 100) / 100,
       });
@@ -213,15 +204,19 @@ function registerTools(server: McpServer): void {
 }
 
 function registerResources(server: McpServer): void {
-  const resourceCtx = () => ({
-    adapters: {
-      line: {
-        state: adapterConnected ? "connected" : "disconnected",
-      },
-    },
-    dbSizeMb: existsSync(dbPath) ? Math.round(statSync(dbPath).size / (1024 * 1024) * 100) / 100 : 0,
-    jsonlSizeMb: existsSync(jsonlPath) ? Math.round(statSync(jsonlPath).size / (1024 * 1024) * 100) / 100 : 0,
-  });
+  const resourceCtx = () => {
+    const adapters: Record<string, { state: string }> = {};
+    const statuses = manager.getStatuses();
+    for (const [platform, status] of Object.entries(statuses)) {
+      adapters[platform] = { state: status.connected ? "connected" : "disconnected" };
+    }
+
+    return {
+      adapters,
+      dbSizeMb: existsSync(dbPath) ? Math.round(statSync(dbPath).size / (1024 * 1024) * 100) / 100 : 0,
+      jsonlSizeMb: existsSync(jsonlPath) ? Math.round(statSync(jsonlPath).size / (1024 * 1024) * 100) / 100 : 0,
+    };
+  };
 
   server.resource("chats", "chat://chats", { description: "All chat list" }, async (uri) => {
     const data = handleResource(db, uri.href, resourceCtx());
@@ -253,19 +248,19 @@ function registerResources(server: McpServer): void {
   });
 }
 
-async function coldStart(): Promise<void> {
-  console.error("[daemon] starting cold start flow...");
+async function coldStartAdapter(platform: string): Promise<void> {
+  console.error(`[daemon] [${platform}] starting cold start flow...`);
 
   try {
-    const contactsResult = await runner.sendRequest("get_contacts", {}) as {
+    const contactsResult = await manager.sendRequest(platform, "get_contacts", {}) as {
       contacts: { platform_id: string; display_name: string }[];
     };
-    console.error(`[daemon] fetched ${contactsResult.contacts.length} contacts`);
+    console.error(`[daemon] [${platform}] fetched ${contactsResult.contacts.length} contacts`);
 
     for (const contact of contactsResult.contacts) {
       const upsert = db.prepare(`
         INSERT INTO contacts (platform, platform_id, display_name)
-        VALUES ('line', ?, ?)
+        VALUES (?, ?, ?)
         ON CONFLICT(platform, platform_id) DO UPDATE SET
           display_name = CASE
             WHEN LENGTH(excluded.display_name) > 0
@@ -277,59 +272,60 @@ async function coldStart(): Promise<void> {
           END,
           updated_at = (unixepoch('now', 'subsec') * 1000)
       `);
-      upsert.run(contact.platform_id, contact.display_name);
+      upsert.run(platform, contact.platform_id, contact.display_name);
     }
   } catch (err) {
-    console.error("[daemon] get_contacts failed:", err);
+    console.error(`[daemon] [${platform}] get_contacts failed:`, err);
   }
 
   try {
-    const chatsResult = await runner.sendRequest("get_chats", {}) as {
+    const chatsResult = await manager.sendRequest(platform, "get_chats", {}) as {
       chats: { platform_id: string; type: string; name: string }[];
     };
-    console.error(`[daemon] fetched ${chatsResult.chats.length} chats`);
+    console.error(`[daemon] [${platform}] fetched ${chatsResult.chats.length} chats`);
 
     for (const chat of chatsResult.chats) {
       const upsert = db.prepare(`
         INSERT INTO chats (platform, platform_id, type, name)
-        VALUES ('line', ?, ?, ?)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(platform, platform_id) DO UPDATE SET
           name = COALESCE(excluded.name, chats.name),
           updated_at = (unixepoch('now', 'subsec') * 1000)
       `);
-      upsert.run(chat.platform_id, chat.type, chat.name);
+      upsert.run(platform, chat.platform_id, chat.type, chat.name);
     }
   } catch (err) {
-    console.error("[daemon] get_chats failed:", err);
+    console.error(`[daemon] [${platform}] get_chats failed:`, err);
   }
 
   try {
-    const boxes = await runner.sendRequest("get_message_boxes", {}) as {
+    const boxes = await manager.sendRequest(platform, "get_message_boxes", {}) as {
       id: string;
       lastDeliveredTime: number;
     }[];
-    console.error(`[daemon] discovered ${boxes.length} active conversations (incl. 1:1)`);
+    console.error(`[daemon] [${platform}] discovered ${boxes.length} active conversations (incl. 1:1)`);
 
     for (const box of boxes) {
       const isGroup = box.id.startsWith("c");
-      const exists = db.query<{ id: number }, [string]>(
-        "SELECT id FROM chats WHERE platform_id = ?"
-      ).get(box.id);
+      const exists = db.query<{ id: number }, [string, string]>(
+        "SELECT id FROM chats WHERE platform = ? AND platform_id = ?"
+      ).get(platform, box.id);
 
       if (exists) {
         db.prepare(`
           UPDATE chats SET last_message_at = MAX(COALESCE(last_message_at, 0), ?)
-          WHERE platform_id = ? AND platform = 'line'
-        `).run(box.lastDeliveredTime || null, box.id);
+          WHERE platform_id = ? AND platform = ?
+        `).run(box.lastDeliveredTime || null, box.id, platform);
       } else {
-        const contactName = db.query<{ display_name: string }, [string]>(
-          "SELECT display_name FROM contacts WHERE platform_id = ?"
-        ).get(box.id);
+        const contactName = db.query<{ display_name: string }, [string, string]>(
+          "SELECT display_name FROM contacts WHERE platform = ? AND platform_id = ?"
+        ).get(platform, box.id);
 
         db.prepare(`
           INSERT OR IGNORE INTO chats (platform, platform_id, type, name, last_message_at)
-          VALUES ('line', ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?)
         `).run(
+          platform,
           box.id,
           isGroup ? "group" : "direct",
           contactName?.display_name ?? null,
@@ -338,16 +334,16 @@ async function coldStart(): Promise<void> {
       }
     }
   } catch (err) {
-    console.error("[daemon] get_message_boxes failed:", err instanceof Error ? err.message : err);
+    console.error(`[daemon] [${platform}] get_message_boxes failed:`, err instanceof Error ? err.message : err);
   }
 
-  await backfill();
+  await backfillAdapter(platform);
 }
 
-async function backfill(): Promise<void> {
-  const chats = db.query<{ platform_id: string; last_message_at: number | null }, []>(
-    "SELECT platform_id, last_message_at FROM chats WHERE platform = 'line' ORDER BY last_message_at DESC NULLS LAST"
-  ).all();
+async function backfillAdapter(platform: string): Promise<void> {
+  const chats = db.query<{ platform_id: string; last_message_at: number | null }, [string]>(
+    "SELECT platform_id, last_message_at FROM chats WHERE platform = ? ORDER BY last_message_at DESC NULLS LAST"
+  ).all(platform);
 
   let totalBackfilled = 0;
   const PER_CHAT_BATCH = 50;
@@ -357,7 +353,7 @@ async function backfill(): Promise<void> {
     if (totalBackfilled >= GLOBAL_TARGET) break;
 
     try {
-      const result = await runner.sendRequest("backfill", {
+      const result = await manager.sendRequest(platform, "backfill", {
         chat_id: chat.platform_id,
         before_timestamp: Date.now(),
         count: PER_CHAT_BATCH,
@@ -367,20 +363,20 @@ async function backfill(): Promise<void> {
         event.source = "backfill";
         event.received_at = Date.now();
         if (!event.sender.display_name) {
-          console.error("[daemon] WARN: backfill event missing display_name", event.sender.platform_id);
+          console.error(`[daemon] [${platform}] WARN: backfill event missing display_name`, event.sender.platform_id);
         }
         jsonl.append(event);
         syncEventToSQLite(db, event);
       }
 
       totalBackfilled += result.events.length;
-      console.error(`[daemon] backfill ${chat.platform_id}: ${result.events.length} msgs (total: ${totalBackfilled})`);
+      console.error(`[daemon] [${platform}] backfill ${chat.platform_id}: ${result.events.length} msgs (total: ${totalBackfilled})`);
     } catch (err) {
-      console.error(`[daemon] backfill ${chat.platform_id} failed:`, err);
+      console.error(`[daemon] [${platform}] backfill ${chat.platform_id} failed:`, err);
     }
   }
 
-  console.error(`[daemon] cold start complete. ${totalBackfilled} messages backfilled.`);
+  console.error(`[daemon] [${platform}] cold start complete. ${totalBackfilled} messages backfilled.`);
 }
 
 function syncCheck(): void {
@@ -417,25 +413,51 @@ function syncCheck(): void {
 }
 
 async function main(): Promise<void> {
-  console.error("[daemon] starting adapter...");
+  console.error("[daemon] starting adapters...");
+
   try {
-    await runner.start();
-    console.error("[daemon] adapter protocol initialized, waiting for LINE login...");
+    await manager.startAll();
+    console.error("[daemon] all adapters protocol initialized, waiting for connections...");
+
+    // Wait up to 120s for adapters to connect
+    const connectedPlatforms: string[] = [];
+
+    const waitForConnections = new Promise<void>((resolve) => {
+      let remaining = manager.platforms.length;
+      if (remaining === 0) { resolve(); return; }
+
+      const checkDone = () => {
+        remaining--;
+        if (remaining <= 0) resolve();
+      };
+
+      manager.onStatus((platform, params) => {
+        const status = params as { state: string };
+        if (status.state === "connected" && !connectedPlatforms.includes(platform)) {
+          connectedPlatforms.push(platform);
+          checkDone();
+        }
+      });
+    });
 
     const loginTimeout = new Promise<"timeout">((resolve) =>
       setTimeout(() => resolve("timeout"), 120_000),
     );
-    const result = await Promise.race([adapterConnectedPromise, loginTimeout]);
+    const result = await Promise.race([waitForConnections, loginTimeout]);
 
     if (result === "timeout") {
-      console.error("[daemon] LINE login timeout (120s). MCP server will start without cold start.");
-    } else {
-      console.error("[daemon] adapter connected");
-      await coldStart();
+      console.error(`[daemon] login timeout (120s). Connected: [${connectedPlatforms.join(", ")}]`);
+    }
+
+    for (const platform of connectedPlatforms) {
+      try {
+        await coldStartAdapter(platform);
+      } catch (err) {
+        console.error(`[daemon] [${platform}] cold start failed:`, err instanceof Error ? err.message : err);
+      }
     }
   } catch (err) {
     console.error("[daemon] adapter start failed (MCP server will start without adapter):", err instanceof Error ? err.message : err);
-    adapterConnected = false;
   }
 
   console.error("[daemon] starting MCP server...");
@@ -445,7 +467,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     console.error(`\n[daemon] ${signal} received, shutting down...`);
     closeMcp();
-    await runner.stop();
+    await manager.shutdownAll();
     db.close();
     jsonl.close();
     console.error("[daemon] shutdown complete");

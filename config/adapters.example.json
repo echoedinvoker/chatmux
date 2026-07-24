@@ -1,0 +1,21 @@
+{
+  "adapters": [
+    {
+      "platform": "line",
+      "command": "node",
+      "args": ["--import", "tsx", "src/adapters/line/index.ts"],
+      "cwd": "/home/matt/Documents/chatmux",
+      "enabled": true
+    },
+    {
+      "platform": "telegram",
+      "command": "/home/matt/Documents/chatmux-adapter-telegram/.venv/bin/python",
+      "args": ["/home/matt/Documents/chatmux-adapter-telegram/main.py"],
+      "env": {
+        "TELEGRAM_API_ID": "YOUR_API_ID",
+        "TELEGRAM_API_HASH": "YOUR_API_HASH"
+      },
+      "enabled": false
+    }
+  ]
+}
