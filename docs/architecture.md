@@ -79,9 +79,10 @@ LINE pushes a message
   → LINE Adapter receives it and decrypts E2EE
   → stdio notification: { method: "event", params: { type: "message", ... } }
   → Core Adapter Runner receives the event
-  → Storage: append to JSONL (truth source)
-  → Storage: INSERT OR IGNORE into SQLite (query view, deduped by UNIQUE constraint)
-  → FTS5 trigger: full-text index updated in step
+  → Storage: landEvent (the single landing entry point, see below)
+      → append to JSONL (truth source)
+      → INSERT OR IGNORE into SQLite (query view, deduped by UNIQUE constraint)
+      → FTS5 trigger: full-text index updated in step
   → MCP Server: notifications/resources/updated → consumer fetches the latest data
 ```
 
@@ -96,8 +97,30 @@ Claude Code calls the send_message tool
   → SafetyRail checks: RateLimiter(5/min) → ErrorTracker → KillSwitch
   → passes → Adapter Runner forwards a send_message request to the LINE Adapter
   → LINE Adapter calls linejs sendMessage
-  → returns success/error → MCP tool response → Claude Code
+  → returns { message_id, timestamp }
+  → Core lands the message it just sent: Storage landEvent (same entry point as above)
+      → JSONL → SQLite → MCP Server: notifications/resources/updated
+  → MCP tool response → Claude Code
 ```
+
+The landing step is what lets a consumer display its own outgoing messages. Without it the
+message reaches the platform and vanishes from chatmux's own view, unless the platform
+happens to echo it back — LINE does, Telegram does not.
+
+### The single landing entry point
+
+Both paths above funnel through `landEvent` (`src/core/storage/land-event.ts`), never
+appending on their own. It keeps an in-memory map of recently landed
+`platform:platform_message_id` keys (60 s TTL) and lands whichever path arrives first,
+dropping the other with a `deduped echo` log line.
+
+The deduplication exists for JSONL, not SQLite. SQLite absorbs duplicates through
+`INSERT OR IGNORE`; the append-only log has no such defence, and a duplicated line in the
+truth source cannot be repaired automatically. Checking on the way in, in one place, is the
+only point where both paths can be compared.
+
+Backfill is deliberately outside this: it moves hundreds of messages at once, which would
+flood the map, and its duplicate-handling story is SQLite's `INSERT OR IGNORE` anyway.
 
 ```
 SafetyRail intercepts:
@@ -136,7 +159,7 @@ Daemon starts
 |-----------|------|--------------|
 | **Adapter** | Platform connection (auth/push/reconnect), E2EE decryption, event format conversion, reporting platform rate limits | Storage, search, rate-limit decisions, serving MCP |
 | **Adapter Runner** | Spawning/watching/restarting adapters, stdio JSON-RPC routing, process-crash ErrorTracker (kill at 5) | Platform-specific logic, storage |
-| **Storage** | JSONL writes, SQLite sync, FTS5 indexing, dedup, query API | Communication protocols, rate limiting |
+| **Storage** | JSONL writes, SQLite sync, FTS5 indexing, dedup (SQLite `UNIQUE` + the in-memory landing keys in `land-event.ts`), query API | Communication protocols, rate limiting |
 | **SafetyRail** | Send rate limiting, send-failure ErrorTracker (kill at 3), KillSwitch | Storage, adapter lifecycle |
 | **MCP Server** | Tool dispatch, resource serving, subscription notifications | Platform connections, direct SQLite access (goes through the Storage query API) |
 

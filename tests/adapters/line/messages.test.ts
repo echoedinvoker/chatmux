@@ -250,6 +250,23 @@ describe("handleSendMessage", () => {
     expect(result.timestamp).toBe(1690000000000);
   });
 
+  it("normalizes second-precision createdTime to milliseconds", async () => {
+    // 實測：LINE 的 sendCompactMessage 回的是秒級 epoch（事件路徑則是毫秒）。
+    // protocol 與 JsonlEvent 約定毫秒，不轉會讓訊息落到 1970。
+    const client = createMockClient({
+      async sendCompactMessage() {
+        return { sequenceId: 1, messageId: BigInt(999), createdTime: 1784971885 };
+      },
+    });
+
+    const result = await handleSendMessage(client, {
+      chat_id: "u_target",
+      content: { type: "text", text: "hi" },
+    });
+
+    expect(result.timestamp).toBe(1784971885000);
+  });
+
   it("throws on send failure", async () => {
     const client = createMockClient({
       async sendCompactMessage() {

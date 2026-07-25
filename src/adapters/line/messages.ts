@@ -180,8 +180,17 @@ export async function handleSendMessage(
   const result = await client.sendCompactMessage(params.chat_id, params.content.text);
   return {
     message_id: String(result.messageId),
-    timestamp: result.createdTime,
+    timestamp: toMillis(result.createdTime),
   };
+}
+
+/**
+ * LINE 的 sendCompactMessage 回秒級 epoch，事件路徑（handleOp / getPreviousMessages）
+ * 則是毫秒。protocol 與 JsonlEvent 一律用毫秒，所以在 adapter 邊界正規化。
+ * 門檻 1e12 ＝ 2001 年的毫秒值；秒級要超過它得等到西元 33658 年，不會誤判。
+ */
+function toMillis(epoch: number): number {
+  return epoch < 1e12 ? epoch * 1000 : epoch;
 }
 
 export interface BackfillParams {

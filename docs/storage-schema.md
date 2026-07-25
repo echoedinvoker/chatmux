@@ -243,8 +243,16 @@ END;
 
 ## Synchronous write path
 
+Two things write here: an incoming event from an adapter, and core landing a message the
+user just sent (a successful `send_message` produces an event of its own). Both go through
+`landEvent` (`src/core/storage/land-event.ts`), which is where the deduplication below
+happens. Backfill bypasses it and appends directly.
+
 ```
-receive event (from an adapter stdio notification)
+landEvent(event)  ← from an adapter stdio notification, or from a successful send
+  │
+  ├─ 0. Deduplicate on `platform:platform_message_id` (in-memory, 60 s TTL)
+  │     Already seen → return, write nothing. Otherwise record the key and continue.
   │
   ├─ 1. Append to JSONL (truth source; always succeeds unless the disk is full)
   │
@@ -255,16 +263,27 @@ receive event (from an adapter stdio notification)
   │     d. FTS5 trigger fires automatically
   │     e. INSERT attachments (for media content)
   │
-  └─ 3. If the SQLite INSERT fails:
-        a. JSONL is already written — not rolled back, by design
-        b. Log a warning
-        c. The startup sync check finds events present in JSONL but missing from
-           SQLite and retries the sync
+  ├─ 3. If the JSONL append fails:
+  │     a. Nothing was written — release the deduplication key so a retry or the
+  │        other path can still land this message, then rethrow
+  │
+  ├─ 4. If the SQLite INSERT fails:
+  │     a. JSONL is already written — not rolled back, by design
+  │     b. Keep the deduplication key. The message *has* landed in the truth source;
+  │        releasing it would let the other path append a second JSONL line
+  │     c. Log a warning
+  │     d. The startup sync check finds events present in JSONL but missing from
+  │        SQLite and retries the sync
+  │
+  └─ 5. Notify subscribers that the chat's messages resource changed
 ```
 
 ### Dedup semantics
 
-- **The same event written twice** (backfill interleaving with a live event): JSONL gets two lines, being append-only; SQLite gets one row, thanks to `INSERT OR IGNORE`. More JSONL lines than SQLite rows is normal and expected.
+- **Two layers, protecting different things.** SQLite is defended by `UNIQUE(platform, platform_message_id)` + `INSERT OR IGNORE` and needs nothing else. JSONL is append-only with no constraint at all, so a duplicate there is permanent damage to the truth source — hence the in-memory check inside `landEvent`, before anything is written.
+- **A self-sent message can arrive twice**: once when core lands it after a successful send, once when the platform echoes it back as a live event (LINE does this; Telegram does not). Whichever arrives first lands it; the other is dropped with a `deduped echo` log line. The window between them is small and unpredictable — the echo travels the adapter's push connection while the send response travels the RPC channel — which is why the check lives at the shared entry point rather than at either caller.
+- **Backfill interleaving with a live event**: JSONL gets two lines, being append-only; SQLite gets one row, thanks to `INSERT OR IGNORE`. More JSONL lines than SQLite rows is normal and expected. Backfill moves hundreds of messages at a time and stays outside the in-memory check by design.
+- **Counting rows in SQLite will not reveal duplicates.** `INSERT OR IGNORE` hides them. Verifying deduplication means counting lines in JSONL.
 - **Startup sync check**: verifies that the `platform_message_id` of each of the last 100 JSONL lines exists in SQLite. Anything missing logs a warning and retries the sync; it never aborts startup.
 
 ## Capacity estimate

@@ -1,7 +1,7 @@
 # Adapter Protocol
 
-> **Protocol version**: 0.3
-> **Validated against**: LINE (v0.1), Telegram (v0.2, v0.3)
+> **Protocol version**: 0.4
+> **Validated against**: LINE (v0.1, v0.4), Telegram (v0.2, v0.3, v0.4)
 > **Changelog**: at the bottom of this document
 
 A chatmux adapter is a child process that talks to the core daemon over
@@ -243,6 +243,38 @@ API is usually already covered by `get_chats`.
 ]
 ```
 
+### `get_self` (optional)
+
+> **Optional since v0.4.** An adapter that does not support it replies with JSON-RPC error
+> `-32601` (Method not found). Core matches on `error.code` only — same convention as
+> §get_message_boxes — and carries on without an identity for that platform.
+
+Reports who the logged-in account is on this platform. Core needs it to land the messages
+the user sends themselves: a `send_message` response carries a `message_id` but no sender,
+and core has no platform-independent way to know its own identity.
+
+Core issues this request **after** the adapter reports `status: "connected"`, as part of
+the cold-start flow — not during `initialize`. Both first-party adapters log in
+asynchronously (their `initialize` handler returns capabilities immediately and connects in
+the background), so the identity simply does not exist yet at `initialize` time.
+
+**Request params**: `{}`
+
+**Response result:**
+```json
+{
+  "platform_id": "u1234567890abcdef",
+  "display_name": "Matt"
+}
+```
+
+`display_name` may be an empty string when the platform cannot supply a name; core then
+falls back to a placeholder. If the method is unsupported or the response is unusable, core
+lands self-sent messages under the sentinel `platform_id: "self"` instead of dropping them.
+
+An adapter that maintains a contact cache should register itself there while handling this
+request, so its own messages resolve to a real name rather than a raw account ID.
+
 ### `send_message`
 
 Sends a message through the platform. Core has already run SafetyRail checks before
@@ -278,6 +310,18 @@ a bare platform_id.
   "message": "recipient not found"
 }
 ```
+
+⚠️ **`timestamp` is Unix epoch in milliseconds**, same as everywhere else in this protocol.
+Normalize at the adapter boundary if the platform SDK returns seconds — several do, and
+their send responses often disagree with their own event payloads. Core takes the value at
+face value: a second-precision timestamp lands the message in 1970, which sorts it to the
+top of the conversation where nobody will find it.
+
+⚠️ **`message_id` is required for the message to land.** Core writes a message event of its
+own after a successful send (see [`mcp-interface.md`](./mcp-interface.md)), keyed on this
+ID. An adapter that omits it still reports the send as successful, but the message will not
+appear in storage or in any consumer — core will not invent an ID, because it doubles as
+the deduplication key.
 
 ### `backfill`
 
@@ -433,6 +477,9 @@ Core spawns the adapter process
   ├─ Core sends: get_message_boxes {} (optional, skipped on -32601)
   │   └─ Adapter responds: [ { id, lastDeliveredTime } ] or error -32601
   │
+  ├─ Core sends: get_self {} (optional, skipped on -32601)
+  │   └─ Adapter responds: { platform_id, display_name } or error -32601
+  │
   ├─ Core sends: backfill { chat_id, before_timestamp, count }  (repeated per chat)
   │   └─ Adapter responds: { events, has_more, oldest_timestamp }
   │
@@ -506,6 +553,16 @@ A valid adapter is a standalone program in any language that only needs to:
 ---
 
 ## Changelog
+
+### v0.4 — core can tell who it is
+
+Additive and non-breaking; a v0.3 adapter runs unchanged.
+
+| Change | Rationale |
+|--------|-----------|
+| Added optional `get_self` | Core had no platform-independent way to know its own identity, so a message the user sent themselves could not be turned into an event — it had no sender. Consumers therefore never saw their own outgoing messages unless the platform happened to echo them back. Asked after `connected` rather than at `initialize`, because adapters that log in asynchronously do not know their identity yet when `initialize` returns |
+| Documented that `send_message.timestamp` is milliseconds | The unit was implied by an example and violated in practice: a platform SDK returning seconds landed messages in 1970, which hid them at the top of the conversation while the send itself reported success |
+| Documented that `send_message.message_id` gates landing | Core keys the event it writes on this ID and will not fabricate one, since the same value is the deduplication key against platform echoes |
 
 ### v0.3 — optional methods actually close the loop
 

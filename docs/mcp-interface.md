@@ -287,6 +287,25 @@ Sends a message, forwarded to the matching adapter after SafetyRail checks.
 }
 ```
 
+**A successful send also lands the message.** Core writes a `message` event of its own —
+same path as any incoming event: JSONL, then SQLite, then a `notifications/resources/updated`
+for `chat://chats/{id}/messages`. A subscribed consumer therefore sees the message it just
+sent without re-reading anything, which is the whole point: before this, a client had no way
+to display its own outgoing messages except on platforms that happened to echo them back.
+
+The sender is the identity the adapter reported via the optional `get_self` request. When
+an adapter does not implement it, the message still lands, attributed to a sentinel account.
+
+Some platforms *do* echo self-sent messages back as live events (LINE does, Telegram does
+not). Core funnels both paths — its own landing and the platform echo — through a single
+entry point keyed on `platform_message_id`, first one wins. SQLite would have absorbed the
+duplicate anyway via `INSERT OR IGNORE`; the append-only JSONL log would not, which is what
+the deduplication actually protects.
+
+**A send with no `message_id` does not land.** The tool still reports `success: true` — the
+message really did reach the platform — but core will not invent an ID for an append-only
+log whose deduplication depends on it. Expect a WARN in the daemon log.
+
 **Example output** (blocked by SafetyRail):
 ```json
 {
