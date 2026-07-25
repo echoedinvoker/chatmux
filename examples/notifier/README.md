@@ -32,7 +32,55 @@ bun run examples/notifier/index.ts
 | `CHATMUX_SOCKET` | (unset) | Unix socket path. Preferred when set |
 | `CHATMUX_MCP_PORT` | `7717` | Loopback TCP port, used when no socket is set |
 | `CHATMUX_DATA_DIR` | `~/.local/share/chatmux` | Where the cursor file lives |
+| `CHATMUX_NOTIFY_HOOK` | (unset) | Path to **your own** module exporting `notify(event)`. Overrides the bundled demo hook |
 | `NOTIFIER_POLL_MS` | `15000` | Poll interval |
+
+### Keep your policy out of this repo
+
+`notify.ts` here is a demonstration that prints to stdout. Editing it means editing a
+tracked file, which is the wrong home for your chat filters, credentials, and quiet
+hours. Write your own module instead and point `CHATMUX_NOTIFY_HOOK` at it:
+
+```ts
+// ~/.config/chatmux/notify-hook.ts
+export async function notify(event) {
+  if (shouldStayQuiet(event)) return;
+  await Bun.$`notify-send -a chatmux ${event.message.sender.display_name} ${event.message.content.text}`.quiet();
+}
+```
+
+```bash
+CHATMUX_NOTIFY_HOOK=~/.config/chatmux/notify-hook.ts bun run examples/notifier/index.ts
+```
+
+Throwing from your hook is meaningful: the cursor does not advance, so the event is
+retried on the next poll.
+
+### Running it as a service
+
+To get notifications whether or not any editor or AI client is open, run it as a
+systemd user unit alongside the daemon. Note that a `systemd --user` service does **not**
+inherit your session bus, so `notify-send` needs `DBUS_SESSION_BUS_ADDRESS` set
+explicitly:
+
+```ini
+[Unit]
+Wants=chatmux.service
+After=chatmux.service
+
+[Service]
+ExecStart=/path/to/bun run examples/notifier/index.ts
+WorkingDirectory=/path/to/chatmux
+Restart=always
+Environment=CHATMUX_NOTIFY_HOOK=%h/.config/chatmux/notify-hook.ts
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+
+[Install]
+WantedBy=default.target
+```
+
+`Wants` rather than `Requires`: if the daemon stops, the notifier should keep retrying
+rather than be torn down with it.
 
 Cursor state: `$CHATMUX_DATA_DIR/consumers/notifier/cursor.json`. Delete it to start
 over from now; it is not part of chatmux's data model, it is this consumer's own.

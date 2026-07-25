@@ -14,6 +14,8 @@
  * Run:  bun run examples/notifier/index.ts
  */
 
+import { resolve } from "node:path";
+
 import { McpClient, endpointFromEnv } from "./mcp-client.js";
 import { CursorStore, defaultCursorPath } from "./cursor-store.js";
 import { notify, type ChatmuxEvent } from "./notify.js";
@@ -117,13 +119,42 @@ function isAhead(cursor: string, headCursor: string): boolean {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+/**
+ * Load the notify hook.
+ *
+ * `notify.ts` in this directory is a *demonstration* hook that prints to stdout. Your
+ * real policy — which chats matter, where notifications go, quiet hours, credentials —
+ * should not live in this repository at all. Point `CHATMUX_NOTIFY_HOOK` at a module of
+ * your own exporting `notify(event)` and it is used instead.
+ *
+ * That keeps the three layers honest: primitives in core, a minimal reference consumer
+ * here, and your policy in your own private config.
+ */
+export async function loadNotifyHook(
+  hookPath: string | undefined,
+): Promise<(event: ChatmuxEvent) => Promise<void>> {
+  if (!hookPath) return notify;
+
+  const resolved = resolve(hookPath);
+  const mod = (await import(resolved)) as { notify?: unknown };
+
+  if (typeof mod.notify !== "function") {
+    throw new Error(`${resolved} does not export a notify() function`);
+  }
+
+  console.error(`[notifier] using hook ${resolved}`);
+  return mod.notify as (event: ChatmuxEvent) => Promise<void>;
+}
+
 async function main(): Promise<void> {
+  const notifyFn = await loadNotifyHook(process.env.CHATMUX_NOTIFY_HOOK);
+
   const client = new McpClient(endpointFromEnv());
   await client.connect();
   console.error("[notifier] connected to chatmux");
 
   const store = new CursorStore(defaultCursorPath());
-  const sink: Sink = { notify, save: c => store.save(c) };
+  const sink: Sink = { notify: notifyFn, save: c => store.save(c) };
 
   let cursor = store.load();
   if (cursor == null) {
