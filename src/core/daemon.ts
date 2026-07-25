@@ -16,6 +16,7 @@ import { startMcpServer } from "./mcp/server.js";
 import {
   handleListChats,
   handleReadMessages,
+  handleReadEvents,
   handleSearchMessages,
   handleSendMessage,
   handleGetStatus,
@@ -140,6 +141,19 @@ function registerTools(server: McpServer): void {
     },
     async ({ chat_id, limit, before, after }) => {
       const result = handleReadMessages(db, { chat_id, limit, before, after });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    "read_events",
+    "Tail the event log from a cursor. Omit `since` to get the current head cursor without replaying history. Cursors are opaque — echo them back verbatim.",
+    {
+      since: z.string().optional().describe("Opaque cursor from a previous read_events / get_status call. Omit to start tailing from now."),
+      limit: z.number().optional().default(100),
+    },
+    async ({ since, limit }) => {
+      const result = handleReadEvents(db, { since, limit });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );

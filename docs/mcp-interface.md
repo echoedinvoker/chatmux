@@ -1,6 +1,6 @@
 # MCP Interface
 
-chatmux 透過 MCP Streamable HTTP 暴露 5 個 tools + 4 個 resources + resource subscription，**同時開兩個 listener**。
+chatmux 透過 MCP Streamable HTTP 暴露 6 個 tools + 4 個 resources + resource subscription，**同時開兩個 listener**。
 
 ## 傳輸
 
@@ -129,6 +129,70 @@ claude mcp list
 }
 ```
 
+### `read_events`
+
+從 cursor 續讀事件日誌。這是 **push consumer 的基礎 primitive**——回答「這個位置之後發生了什麼」。
+
+**為什麼不能用 `read_messages({ after })` 代替**：`after` 篩的是 **timestamp**，而 backfill 會插入比既有資料更舊的訊息。consumer 用 timestamp 記進度，那些訊息**永遠看不到**。cursor 走的是 **core 接受寫入的順序**，所以照樣送達。
+
+**Input Schema**：
+```json
+{
+  "type": "object",
+  "properties": {
+    "since": { "type": "string", "description": "Opaque cursor from a previous read_events / get_status call. Omit to start tailing from now." },
+    "limit": { "type": "number", "default": 100 }
+  }
+}
+```
+
+**Output 範例**：
+```json
+{
+  "events": [
+    {
+      "cursor": "evt:1643",
+      "type": "message",
+      "message": {
+        "id": "line:m1234567890",
+        "chat_id": "line:c1234567890abcdef",
+        "sender": { "id": "line:u1234567890abcdef", "display_name": "Alice" },
+        "timestamp": 1690000000000,
+        "content": { "type": "text", "text": "你好！" }
+      }
+    }
+  ],
+  "next_cursor": "evt:1643",
+  "head_cursor": "evt:1643",
+  "has_more": false
+}
+```
+
+**Cursor 契約**：
+
+| 規則 | 說明 |
+|------|------|
+| **Opaque** | cursor 是不透明 token。原封不動回傳，**不要 parse、比較大小或做算術**。編碼將來會變 |
+| **省略 `since`** | 回傳當前 head、events 為空。新 consumer 用這個「從現在開始跟」，不必 replay 全部歷史 |
+| **`next_cursor`** | 下次呼叫要傳回來的位置。沒有新事件時**維持原位**，所以閒置的 consumer 不會失去有效 cursor |
+| **`head_cursor`** | 日誌目前的尾端。若你存的 cursor 超前 head（SQLite 被重建或截斷），代表該重置——否則會永久停滯 |
+| **無效 cursor** | 回 `{ "error": "invalid_cursor", "detail": ... }`，不是靜默回空 |
+| **順序** | 事件依 core 接受順序**遞增**排列，與 `timestamp` 順序無關 |
+| **稀疏** | cursor 序列**有斷點，不連續**。不要假設相鄰、也**不要用兩個 cursor 相減當待處理筆數**——實測 1644 筆訊息的序列已燒到 18744。只能問「有沒有更多」（`has_more`），不能問「還剩幾筆」 |
+| **Dedup** | 被 `INSERT OR IGNORE` 擋掉的重複訊息不會推進 cursor（NEVER #7） |
+
+**目前涵蓋範圍**：只有 `message` 事件會進 SQLite（見 `syncEventToSQLite`），所以只有這類被編號。將來持久化其他事件類型時，它們會加入**同一條**序列。
+
+**與 subscription 搭配使用**（見下方 Resource Subscription）：
+
+```
+subscribe chat://chats  →  收到 notifications/resources/updated
+                        →  read_events({ since: 上次的 next_cursor })
+                        →  存下新的 next_cursor
+```
+
+subscription 只說「有變動」，read_events 說「變動是什麼」。兩者合起來才是完整的 push 管線。
+
 ### `search_messages`
 
 全文搜尋訊息。使用 FTS5 + highlight snippet。
@@ -252,10 +316,13 @@ claude mcp list
     "oldest_message": 1680000000000,
     "newest_message": 1690000000000,
     "db_size_mb": 15.2,
-    "jsonl_size_mb": 22.8
+    "jsonl_size_mb": 22.8,
+    "cursor": "evt:1643"
   }
 }
 ```
+
+`storage.cursor` 是當前 head cursor——consumer 可以直接拿去餵 `read_events({ since })` 開始跟。
 
 ## Resources
 

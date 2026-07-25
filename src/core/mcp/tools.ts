@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { listChats, getMessages, searchMessages, getStatus, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
+import { listChats, getMessages, searchMessages, getStatus, getEventsSince, getHeadSeq, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
 import type { SafetyRail } from "../safety.js";
 
 interface ChatOutput {
@@ -155,6 +155,103 @@ export function handleReadMessages(
   return { messages, has_more: hasMore, oldest_timestamp: oldest, newest_timestamp: newest };
 }
 
+/**
+ * Cursors are OPAQUE. Consumers must echo the token back verbatim and never parse,
+ * compare or do arithmetic on it. The prefix exists to make that contract visible at
+ * a glance and to let the encoding change without breaking any consumer.
+ *
+ * Internally it wraps `messages.id`. NEVER #4 forbids auto-increment IDs in external
+ * APIs because they must not be used as message *identity* — a message is addressed
+ * as `platform:platform_message_id`. A cursor is a *position* in the write log, not
+ * an identity, and opacity keeps consumers from conflating the two.
+ */
+const CURSOR_PREFIX = "evt:";
+
+export function encodeCursor(seq: number): string {
+  return `${CURSOR_PREFIX}${seq}`;
+}
+
+/** Returns null when the token was not issued by this core. */
+export function decodeCursor(cursor: string): number | null {
+  if (!cursor.startsWith(CURSOR_PREFIX)) return null;
+  const raw = cursor.slice(CURSOR_PREFIX.length);
+  if (raw.length === 0) return null;
+  const seq = Number(raw);
+  if (!Number.isInteger(seq) || seq < 0) return null;
+  return seq;
+}
+
+interface EventOutput {
+  cursor: string;
+  type: string;
+  message: MessageOutput;
+}
+
+interface ReadEventsResult {
+  events: EventOutput[];
+  next_cursor: string;
+  head_cursor: string;
+  has_more: boolean;
+}
+
+interface ReadEventsError {
+  error: string;
+  detail: string;
+}
+
+/**
+ * The push-consumer primitive: "what happened after this position?"
+ *
+ * Omitting `since` returns the current head with no events — that is how a fresh
+ * consumer starts tailing without replaying the entire history.
+ *
+ * `head_cursor` lets a consumer detect that its stored cursor is ahead of the log
+ * (SQLite rebuilt or truncated) and reset instead of stalling forever.
+ *
+ * Scope today: only `message` events reach SQLite (see syncEventToSQLite), so only
+ * those are sequenced. Additional event types join this same sequence when persisted.
+ */
+export function handleReadEvents(
+  db: Database,
+  params: { since?: string; limit?: number },
+): ReadEventsResult | ReadEventsError {
+  const limit = params.limit ?? 100;
+  const head = getHeadSeq(db);
+
+  if (params.since == null) {
+    return {
+      events: [],
+      next_cursor: encodeCursor(head),
+      head_cursor: encodeCursor(head),
+      has_more: false,
+    };
+  }
+
+  const since = decodeCursor(params.since);
+  if (since == null) {
+    return {
+      error: "invalid_cursor",
+      detail: `not a cursor issued by this core: ${params.since}`,
+    };
+  }
+
+  const rows = getEventsSince(db, since, limit + 1);
+  const hasMore = rows.length > limit;
+  const trimmed = hasMore ? rows.slice(0, limit) : rows;
+
+  return {
+    events: trimmed.map(r => ({
+      cursor: encodeCursor(r.id),
+      type: "message",
+      message: formatMessage(r, db),
+    })),
+    // Hold position when nothing new, so an idle consumer keeps a valid cursor.
+    next_cursor: encodeCursor(trimmed.length > 0 ? trimmed[trimmed.length - 1]!.id : since),
+    head_cursor: encodeCursor(head),
+    has_more: hasMore,
+  };
+}
+
 interface SearchResultOutput {
   message: MessageOutput;
   snippet: string | null;
@@ -284,6 +381,8 @@ interface StatusOutput {
     newest_message: number | null;
     db_size_mb: number;
     jsonl_size_mb: number;
+    /** Opaque head cursor — where a consumer would start tailing from now. */
+    cursor: string;
   };
 }
 
@@ -300,6 +399,7 @@ export function handleGetStatus(db: Database, input: StatusInput): StatusOutput 
       newest_message: stats.newest_message_at,
       db_size_mb: input.dbSizeMb ?? 0,
       jsonl_size_mb: input.jsonlSizeMb ?? 0,
+      cursor: encodeCursor(getHeadSeq(db)),
     },
   };
 }

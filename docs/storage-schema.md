@@ -114,6 +114,30 @@ CREATE INDEX idx_messages_chat_timestamp ON messages(chat_id, timestamp DESC);
 CREATE INDEX idx_messages_timestamp ON messages(timestamp DESC);
 ```
 
+#### `id` 是寫入順序，`timestamp` 是事件時間——兩者不同
+
+`AUTOINCREMENT` 保證 `id` **單調遞增且永不重用**。它記錄的是「core 第幾次接受這筆寫入」，跟訊息本身發生的時間無關：
+
+```
+寫入順序 (id)   timestamp        source
+    1           5000             live       ← 剛收到的即時訊息
+    2           1000             backfill   ← 回填的舊訊息，timestamp 更小
+```
+
+這個差異是 `read_events` cursor 存在的理由。consumer 若用 `timestamp` 記進度（`read_messages({ after: 5000 })`），上表第 2 筆**永遠不會被看到**——它的 timestamp 落在水位線以下。用 `id` 當 cursor 就正常送達。
+
+推論：
+
+- **不要**假設 `ORDER BY id` 等於 `ORDER BY timestamp`
+- **不要**把 `id` 當訊息身分對外暴露（NEVER #4）——對外身分是 `platform:platform_message_id`。cursor 是**位置**不是身分，所以以 opaque token（`evt:<id>`）形式輸出
+- 從 JSONL 重建 SQLite 會 replay 同樣的檔案順序，因此重建後 `id` 可重現
+
+**序列是稀疏的**：`INSERT OR IGNORE` 撞到 `UNIQUE(platform, platform_message_id)` 時，AUTOINCREMENT 值**已經配掉且不回收**。backfill 重送既有訊息（NEVER #7 預期的情況）會持續燒序列而不新增列。實測某個 1644 筆訊息的 DB，`MAX(id)` 已達 18744、`sqlite_sequence` 到 20837、序列中有 37 個斷點。
+
+推論：`MAX(id)` 與列數無關，cursor 之間的差值**不代表筆數**。
+
+`getHeadSeq()` 刻意用 `MAX(id)` 而非 `sqlite_sequence`——後者會回報一個尚未有任何列存在的位置，讓剛啟動的 consumer 一開始就「超前 head」，誤觸重置邏輯。
+
 ### attachments
 
 ```sql

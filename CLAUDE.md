@@ -18,11 +18,12 @@ AI clients (Claude Code). Not a chat app — no UI, pure data layer.
 - `src/core/storage/jsonl.ts` — JSONL append-only event writer (truth source)
 - `src/core/storage/sqlite.ts` — SQLite schema + JSONL→SQLite sync (query view)
 - `src/core/storage/fts.ts` — FTS5 bigram+trigram setup + sync triggers
-- `src/core/storage/query.ts` — High-level queries: search, paginated read, stats
+- `src/core/storage/query.ts` — High-level queries: search, paginated read, event cursor, stats
 - `src/core/mcp/server.ts` — MCP Streamable HTTP on loopback TCP + unix socket (shared handler)
-- `src/core/mcp/tools.ts` — 5 MCP tools (list_chats, read_messages, search_messages, send_message, get_status)
+- `src/core/mcp/tools.ts` — 6 MCP tools (list_chats, read_messages, read_events, search_messages, send_message, get_status)
 - `src/core/mcp/resources.ts` — 4 MCP resources + subscription
 - `src/adapters/line/` — LINE adapter (Node+tsx, NOT Bun — LEGY Push needs HTTP/2)
+- `examples/notifier/` — Reference consumer: cursor-based event tailing. NOT core (see NEVER #11)
 - `tests/` — Mirrors src/ structure
 - `docs/` — Architecture and protocol references
 - `config/chatmux.service` — systemd user service
@@ -70,7 +71,7 @@ Two independent ErrorTracker+KillSwitch instances:
 - (A) SafetyRail send failures: kill at 3 → disconnect
 - (B) Adapter runner process crashes: kill at 5 → stop restart attempts
 
-## NEVER (10 Anti-patterns)
+## NEVER (11 Anti-patterns)
 
 1. NEVER import linejs (or any platform SDK) in core — only adapters touch platform APIs
 2. NEVER bypass SafetyRail for send_message — adapter is a child process, stdio is the only channel
@@ -82,6 +83,20 @@ Two independent ErrorTracker+KillSwitch instances:
 8. NEVER JOIN messages_fts with non-indexed tables — the canonical FTS5 external-content JOIN (`messages_fts fts JOIN messages m ON m.id = fts.rowid`) is correct and used by search
 9. NEVER assume adapter is running — check adapter status before forwarding send_message
 10. NEVER log message content at info level — messages contain private data, use debug level only
+11. NEVER import from `src/` inside `examples/` — examples are consumers on the far side of the MCP boundary, same as Claude Code or chat.nvim. One relative import into core and the example stops testing the boundary it exists to prove. Enforced by `tests/examples/boundary.test.ts`
+
+### Core vs consumer: two tests before adding to `src/core/`
+
+chatmux is a framework others build on, so core stays policy-free. Anything proposed
+for core must pass both:
+
+1. **Is the answer unique, or does it vary per user?** Varies → not core.
+2. **Could a consumer implement it outside core?** Yes → not core.
+
+Test 2 decides the hard cases. Event cursors belong in core because write order is
+core's private knowledge and is lost forever if not exposed. A notifier fails both
+tests — what deserves interrupting you has no single right answer — so it lives in
+`examples/notifier/` with the actual policy in the user's own private config.
 
 ## Environment
 
@@ -99,7 +114,7 @@ Two independent ErrorTracker+KillSwitch instances:
 - `docs/architecture.md` — Three-layer topology, process model, data flow
 - `docs/adapter-protocol.md` — stdio JSON-RPC contract, adapter lifecycle
 - `docs/storage-schema.md` — JSONL + SQLite schema, FTS5 dual tokenizer
-- `docs/mcp-interface.md` — 5 tools + 4 resources + subscription
+- `docs/mcp-interface.md` — 6 tools + 4 resources + subscription
 - `docs/safety-rail.md` — Dual-layer SafetyRail architecture
 - `docs/line-adapter.md` — LINE-specific: linejs, LEGY Push, E2EE
 - `docs/testing.md` — TDD conventions, line-tui test suite migration

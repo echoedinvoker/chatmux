@@ -16,9 +16,12 @@ const MCP_HEADERS = {
   Accept: "application/json, text/event-stream",
 };
 
+// Stubs, not the daemon's real registrations — this suite is about transport. Kept in
+// sync with daemon.ts registerTools() so the list does not quietly drift.
 const TOOL_NAMES = [
   "list_chats",
   "read_messages",
+  "read_events",
   "search_messages",
   "send_message",
   "get_status",
@@ -91,7 +94,7 @@ describe("MCP server transports", () => {
     expect((json.result as { serverInfo: { name: string } }).serverInfo.name).toBe("chatmux");
   });
 
-  test("TCP: tools/list returns the 5 chatmux tools", async () => {
+  test("TCP: tools/list returns every registered tool", async () => {
     const initRes = await fetch(BASE_URL, {
       method: "POST",
       headers: MCP_HEADERS,

@@ -52,14 +52,15 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 - **Core daemon** (Bun): central process managing storage, safety, and MCP server
 - **LINE adapter** (Node+tsx): child process connecting to LINE via IOSIPAD slot
 - **Storage**: JSONL append-only truth source + SQLite/FTS5 queryable view
-- **MCP server**: Streamable HTTP over loopback TCP (standard MCP clients) + unix socket (same-host sidecars), 5 tools + 4 resources
+- **MCP server**: Streamable HTTP over loopback TCP (standard MCP clients) + unix socket (same-host sidecars), 6 tools + 4 resources
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
 | `list_chats` | List chats with last message preview, search, pagination |
-| `read_messages` | Read messages from a chat with cursor-based pagination |
+| `read_messages` | Read messages from a chat, paginated by timestamp |
+| `read_events` | Tail the event log from an opaque cursor — resumable, survives backfill reordering |
 | `search_messages` | Full-text search (CJK supported via FTS5 trigram + LIKE fallback) |
 | `send_message` | Send message through SafetyRail (rate-limited, error-tracked) |
 | `get_status` | System status: adapter connection + storage stats |
@@ -72,6 +73,17 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 | `chat://chats/{id}/messages` | Recent messages for a chat |
 | `chat://chats/{id}/info` | Chat details with members |
 | `chat://status` | System status |
+
+## Writing a consumer
+
+Core exposes primitives, not policy. Anything that decides *what matters* — which chats
+are worth surfacing, where a notification goes, when to stay quiet — belongs in a
+consumer, on the far side of the MCP boundary.
+
+[`examples/notifier/`](examples/notifier/) is a working reference: it tails the event
+log with a persisted cursor and hands each message to a hook you fill in. Its
+`mcp-client.ts` uses raw `fetch` rather than the TypeScript SDK, so it doubles as a
+wire-protocol reference for consumers in any language.
 
 ## systemd Service
 

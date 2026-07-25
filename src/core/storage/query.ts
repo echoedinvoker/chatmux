@@ -123,6 +123,40 @@ export function getMessages(
     .all(chatId, limit);
 }
 
+/**
+ * Events in core-accept order, ascending, for cursor-based resumption.
+ *
+ * `messages.id` is INTEGER PRIMARY KEY AUTOINCREMENT: monotonic, never reused, and
+ * ordered by when core accepted the write — NOT by message timestamp. Backfill can
+ * insert a message whose timestamp predates everything already stored; its id is
+ * still higher, so a consumer resuming from a cursor still receives it. That is the
+ * property `getMessages({ after })` cannot provide, because `after` is a timestamp.
+ */
+export function getEventsSince(
+  db: Database,
+  since: number,
+  limit: number
+): MessageRow[] {
+  return db
+    .query<MessageRow, [number, number]>(
+      `SELECT id, platform, platform_message_id, chat_id, sender_id,
+              timestamp, content_type, content_text, content_media_url, source
+       FROM messages
+       WHERE id > ?
+       ORDER BY id ASC
+       LIMIT ?`
+    )
+    .all(since, limit);
+}
+
+/** Highest sequence core has accepted. 0 when no events are stored yet. */
+export function getHeadSeq(db: Database): number {
+  return (
+    db.query<{ seq: number | null }, []>("SELECT MAX(id) as seq FROM messages").get()!
+      .seq ?? 0
+  );
+}
+
 export function listChats(
   db: Database,
   opts?: { platform?: string; search?: string; limit?: number; offset?: number }
