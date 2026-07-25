@@ -2,12 +2,26 @@
 
 Local-first personal chat data layer daemon. Connects IM platforms (v0.1: LINE) via child-process adapters, stores messages to JSONL + SQLite/FTS5, exposes MCP tools for AI clients.
 
+## The three repos
+
+chatmux is the core. Platforms plug in below it, consumers sit above it, and both sides of that
+boundary live in their own repos:
+
+| Repo | Role |
+|------|------|
+| **chatmux** (this one) | Core daemon: storage, safety rail, MCP server, LINE adapter |
+| [chatmux-adapter-telegram](https://github.com/echoedinvoker/chatmux-adapter-telegram) | Second platform adapter (Telegram, MTProto user session) |
+| [chat.nvim](https://github.com/echoedinvoker/chat.nvim) | Reference consumer: read and reply to chats inside Neovim |
+
+Adapters speak the [adapter protocol](docs/adapter-protocol.md); consumers speak
+[MCP](docs/mcp-interface.md). Either side can be replaced without touching the other.
+
 ## Quickstart
 
 ### 1. Install
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/echoedinvoker/chatmux.git
 cd chatmux
 bun install
 ```

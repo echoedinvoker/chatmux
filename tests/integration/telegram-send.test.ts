@@ -9,11 +9,11 @@ const LIVE = process.env.CHATMUX_LIVE_TEST === "1";
 const CHAT_ID = process.env.CHATMUX_TEST_CHAT_ID ?? "";
 const DATA_DIR = process.env.CHATMUX_DATA_DIR ?? resolve(process.env.HOME!, ".local/share/chatmux");
 
-const TELEGRAM_COMMAND = "/home/matt/Documents/chatmux-adapter-telegram/.venv/bin/python";
-const TELEGRAM_ARGS = ["/home/matt/Documents/chatmux-adapter-telegram/main.py"];
+const TELEGRAM_COMMAND = process.env.CHATMUX_TELEGRAM_PYTHON ?? "";
+const TELEGRAM_ARGS = [process.env.CHATMUX_TELEGRAM_MAIN ?? ""];
 const TELEGRAM_ENV: Record<string, string> = {
-  TELEGRAM_API_ID: "YOUR_API_ID",
-  TELEGRAM_API_HASH: "YOUR_API_HASH",
+  TELEGRAM_API_ID: process.env.TELEGRAM_API_ID ?? "",
+  TELEGRAM_API_HASH: process.env.TELEGRAM_API_HASH ?? "",
 };
 
 describe.skipIf(!LIVE)("Telegram live send", () => {
@@ -22,6 +22,10 @@ describe.skipIf(!LIVE)("Telegram live send", () => {
 
   beforeAll(async () => {
     if (!CHAT_ID) throw new Error("CHATMUX_TEST_CHAT_ID env required");
+    if (!TELEGRAM_COMMAND || !TELEGRAM_ARGS[0])
+      throw new Error("CHATMUX_TELEGRAM_PYTHON and CHATMUX_TELEGRAM_MAIN env required");
+    if (!TELEGRAM_ENV.TELEGRAM_API_ID || !TELEGRAM_ENV.TELEGRAM_API_HASH)
+      throw new Error("TELEGRAM_API_ID and TELEGRAM_API_HASH env required");
 
     safetyRail = new SafetyRail();
 

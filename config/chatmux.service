@@ -1,14 +1,17 @@
+# systemd user unit. Copy to ~/.config/systemd/user/chatmux.service and
+# replace /path/to/chatmux with the absolute path to your clone.
+# %h expands to your home directory.
+
 [Unit]
 Description=chatmux daemon
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/matt/.bun/bin/bun run src/core/daemon.ts
-WorkingDirectory=/home/matt/Documents/chatmux
+ExecStart=%h/.bun/bin/bun run src/core/daemon.ts
+WorkingDirectory=/path/to/chatmux
 Restart=on-failure
 RestartSec=10
-Environment=HOME=/home/matt
 
 [Install]
 WantedBy=default.target

@@ -185,6 +185,15 @@ and are triggered manually.
 | `CHATMUX_TEST_CHAT_ID` | Yes | Send target with platform prefix, e.g. `line:u1234...` or `telegram:123456789`. Using your own ID (send-to-self) is recommended |
 | `CHATMUX_DATA_DIR` | No | Defaults to `~/.local/share/chatmux`. Must contain a valid auth session |
 
+Adapter-specific tests take the adapter's own location and credentials from env too — the Telegram
+suite reads `CHATMUX_TELEGRAM_PYTHON`, `CHATMUX_TELEGRAM_MAIN`, `TELEGRAM_API_ID`, and
+`TELEGRAM_API_HASH`.
+
+> **Never hard-code credentials or absolute paths into a test file**, not even for a suite that is
+> skipped by default. A skipped test is still committed, still pushed, and still readable by
+> everyone forever — `git log -p` does not respect `describe.skipIf`. Read them from env and fail
+> loudly in `beforeAll` when they are missing.
+
 ### Running them
 
 ```bash

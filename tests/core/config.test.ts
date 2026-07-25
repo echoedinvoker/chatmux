@@ -30,13 +30,13 @@ describe("loadAdapterConfigs", () => {
           platform: "line",
           command: "node",
           args: ["--import", "tsx", "src/adapters/line/index.ts"],
-          cwd: "/home/matt/Documents/chatmux",
+          cwd: "/opt/chatmux",
           enabled: true,
         },
         {
           platform: "telegram",
-          command: "/home/matt/.venv/bin/python",
-          args: ["/home/matt/adapter/main.py"],
+          command: "/opt/venv/bin/python",
+          args: ["/opt/adapter/main.py"],
           env: { TELEGRAM_API_ID: "12345", TELEGRAM_API_HASH: "abc" },
           enabled: true,
         },
@@ -48,11 +48,11 @@ describe("loadAdapterConfigs", () => {
 
     expect(configs[0].platform).toBe("line");
     expect(configs[0].command).toEqual(["node", "--import", "tsx", "src/adapters/line/index.ts"]);
-    expect(configs[0].cwd).toBe("/home/matt/Documents/chatmux");
+    expect(configs[0].cwd).toBe("/opt/chatmux");
     expect(configs[0].env).toBeUndefined();
 
     expect(configs[1].platform).toBe("telegram");
-    expect(configs[1].command).toEqual(["/home/matt/.venv/bin/python", "/home/matt/adapter/main.py"]);
+    expect(configs[1].command).toEqual(["/opt/venv/bin/python", "/opt/adapter/main.py"]);
     expect(configs[1].env).toEqual({ TELEGRAM_API_ID: "12345", TELEGRAM_API_HASH: "abc" });
   });
 
