@@ -77,6 +77,11 @@ interface MessageOutput {
   sender: { id: string; display_name: string };
   timestamp: number;
   content: { type: string; text: string | null };
+  /** Non-null once the message has been edited in place. */
+  edited_at: number | null;
+  /** Non-null once retracted; content is cleared, so this is how a reader tells a
+   *  withdrawn message from an empty one. */
+  retracted_at: number | null;
 }
 
 interface ReadMessagesResult {
@@ -122,6 +127,8 @@ function formatMessage(row: MessageRow, db: Database): MessageOutput {
       type: row.content_type,
       text: row.content_text,
     },
+    edited_at: row.edited_at ?? null,
+    retracted_at: row.retracted_at ?? null,
   };
 }
 
@@ -161,7 +168,7 @@ export function handleReadMessages(
  * compare or do arithmetic on it. The prefix exists to make that contract visible at
  * a glance and to let the encoding change without breaking any consumer.
  *
- * Internally it wraps `messages.id`. NEVER #4 forbids auto-increment IDs in external
+ * Internally it wraps `messages.seq`. NEVER #4 forbids auto-increment IDs in external
  * APIs because they must not be used as message *identity* — a message is addressed
  * as `platform:platform_message_id`. A cursor is a *position* in the write log, not
  * an identity, and opacity keeps consumers from conflating the two.
@@ -209,9 +216,19 @@ interface ReadEventsError {
  * `head_cursor` lets a consumer detect that its stored cursor is ahead of the log
  * (SQLite rebuilt or truncated) and reset instead of stalling forever.
  *
- * Scope today: only `message` events reach SQLite (see syncEventToSQLite), so only
- * those are sequenced. Additional event types join this same sequence when persisted.
+ * A message that is edited or retracted re-enters the sequence at the tail, so a
+ * consumer parked anywhere behind still receives the change. It arrives as the row's
+ * current state, not as a diff: replaying from cursor 0 yields one `edit` event for a
+ * message whose original text the consumer never saw. Consumers applying end state are
+ * served correctly; anything reconstructing edit history should read the JSONL log.
  */
+function eventTypeOf(row: MessageRow): string {
+  // Not mutually exclusive — a message can be edited and then retracted.
+  if (row.retracted_at != null) return "unsend";
+  if (row.edited_at != null) return "edit";
+  return "message";
+}
+
 export function handleReadEvents(
   db: Database,
   params: { since?: string; limit?: number },
@@ -242,12 +259,12 @@ export function handleReadEvents(
 
   return {
     events: trimmed.map(r => ({
-      cursor: encodeCursor(r.id),
-      type: "message",
+      cursor: encodeCursor(r.seq),
+      type: eventTypeOf(r),
       message: formatMessage(r, db),
     })),
     // Hold position when nothing new, so an idle consumer keeps a valid cursor.
-    next_cursor: encodeCursor(trimmed.length > 0 ? trimmed[trimmed.length - 1]!.id : since),
+    next_cursor: encodeCursor(trimmed.length > 0 ? trimmed[trimmed.length - 1]!.seq : since),
     head_cursor: encodeCursor(head),
     has_more: hasMore,
   };

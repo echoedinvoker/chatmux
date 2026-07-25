@@ -10,6 +10,8 @@ export interface SearchResult {
   content_type: string;
   content_text: string | null;
   snippet: string | null;
+  edited_at: number | null;
+  retracted_at: number | null;
 }
 
 export interface MessageRow {
@@ -23,6 +25,9 @@ export interface MessageRow {
   content_text: string | null;
   content_media_url: string | null;
   source: string;
+  seq: number;
+  edited_at: number | null;
+  retracted_at: number | null;
 }
 
 export interface ChatRow {
@@ -55,7 +60,8 @@ export function searchMessages(
     return db
       .query<SearchResult, [string, number]>(
         `SELECT id, platform, platform_message_id, chat_id, sender_id,
-                timestamp, content_type, content_text, content_text AS snippet
+                timestamp, content_type, content_text, content_text AS snippet,
+                edited_at, retracted_at
          FROM messages
          WHERE content_text LIKE '%' || ? || '%'
          ORDER BY timestamp DESC
@@ -68,6 +74,7 @@ export function searchMessages(
     .query<SearchResult, [string, number]>(
       `SELECT m.id, m.platform, m.platform_message_id, m.chat_id, m.sender_id,
               m.timestamp, m.content_type, m.content_text,
+              m.edited_at, m.retracted_at,
               snippet(messages_fts, 0, '<b>', '</b>', '...', 32) AS snippet
        FROM messages_fts fts
        JOIN messages m ON m.id = fts.rowid
@@ -89,7 +96,8 @@ export function getMessages(
     return db
       .query<MessageRow, [number, number, number]>(
         `SELECT id, platform, platform_message_id, chat_id, sender_id,
-                timestamp, content_type, content_text, content_media_url, source
+                timestamp, content_type, content_text, content_media_url, source,
+                seq, edited_at, retracted_at
          FROM messages
          WHERE chat_id = ? AND timestamp < ?
          ORDER BY timestamp DESC
@@ -102,7 +110,8 @@ export function getMessages(
     return db
       .query<MessageRow, [number, number, number]>(
         `SELECT id, platform, platform_message_id, chat_id, sender_id,
-                timestamp, content_type, content_text, content_media_url, source
+                timestamp, content_type, content_text, content_media_url, source,
+                seq, edited_at, retracted_at
          FROM messages
          WHERE chat_id = ? AND timestamp > ?
          ORDER BY timestamp DESC
@@ -114,7 +123,8 @@ export function getMessages(
   return db
     .query<MessageRow, [number, number]>(
       `SELECT id, platform, platform_message_id, chat_id, sender_id,
-              timestamp, content_type, content_text, content_media_url, source
+              timestamp, content_type, content_text, content_media_url, source,
+                seq, edited_at, retracted_at
        FROM messages
        WHERE chat_id = ?
        ORDER BY timestamp DESC
@@ -126,11 +136,14 @@ export function getMessages(
 /**
  * Events in core-accept order, ascending, for cursor-based resumption.
  *
- * `messages.id` is INTEGER PRIMARY KEY AUTOINCREMENT: monotonic, never reused, and
- * ordered by when core accepted the write — NOT by message timestamp. Backfill can
- * insert a message whose timestamp predates everything already stored; its id is
- * still higher, so a consumer resuming from a cursor still receives it. That is the
- * property `getMessages({ after })` cannot provide, because `after` is a timestamp.
+ * Ordered by `seq`, not by message timestamp: backfill can insert a message older than
+ * everything already stored, and a consumer resuming from a cursor must still receive it.
+ * That is the property `getMessages({ after })` cannot provide, because `after` is a
+ * timestamp.
+ *
+ * `seq` rather than `id` because editing or retracting a stored message leaves its id
+ * untouched — a consumer parked past that id would never learn the message changed. Every
+ * change moves the row's seq to the tail instead.
  */
 export function getEventsSince(
   db: Database,
@@ -140,10 +153,11 @@ export function getEventsSince(
   return db
     .query<MessageRow, [number, number]>(
       `SELECT id, platform, platform_message_id, chat_id, sender_id,
-              timestamp, content_type, content_text, content_media_url, source
+              timestamp, content_type, content_text, content_media_url, source,
+                seq, edited_at, retracted_at
        FROM messages
-       WHERE id > ?
-       ORDER BY id ASC
+       WHERE seq > ?
+       ORDER BY seq ASC
        LIMIT ?`
     )
     .all(since, limit);
@@ -152,7 +166,7 @@ export function getEventsSince(
 /** Highest sequence core has accepted. 0 when no events are stored yet. */
 export function getHeadSeq(db: Database): number {
   return (
-    db.query<{ seq: number | null }, []>("SELECT MAX(id) as seq FROM messages").get()!
+    db.query<{ seq: number | null }, []>("SELECT MAX(seq) as seq FROM messages").get()!
       .seq ?? 0
   );
 }
