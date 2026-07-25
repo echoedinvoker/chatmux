@@ -573,6 +573,26 @@ describe("MCP resources", () => {
     const result = handleResource(db, "chat://unknown", { adapters: {} });
     expect(result).toBeNull();
   });
+
+  test("chat://chats/{id}/messages reports the read so history can be fetched", () => {
+    const read: string[] = [];
+    handleResource(db, "chat://chats/line:c_alice/messages", {
+      adapters: {},
+      onChatRead: (id) => read.push(id),
+    });
+    expect(read).toEqual(["line:c_alice"]);
+  });
+
+  test("chat list and status reads are not chat reads", () => {
+    const read: string[] = [];
+    const ctx = { adapters: {}, onChatRead: (id: string) => read.push(id) };
+
+    handleResource(db, "chat://chats", ctx);
+    handleResource(db, "chat://status", ctx);
+    handleResource(db, "chat://chats/line:c_alice/info", ctx);
+
+    expect(read).toEqual([]);
+  });
 });
 
 describe("resource subscription", () => {

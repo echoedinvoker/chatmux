@@ -5,6 +5,11 @@ interface ResourceContext {
   adapters: Record<string, unknown>;
   dbSizeMb?: number;
   jsonlSizeMb?: number;
+  /**
+   * Called when a chat's messages are read. Subscribers re-read the resource rather than
+   * the tool, so without this hook the on-demand trigger would miss that path entirely.
+   */
+  onChatRead?: (chatId: string) => void;
 }
 
 export function handleResource(
@@ -32,6 +37,7 @@ export function handleResource(
     const searchParams = new URLSearchParams(messagesMatch[2] ?? "");
     const limit = searchParams.has("limit") ? Number(searchParams.get("limit")) : 20;
     const result = handleReadMessages(db, { chat_id: chatId, limit });
+    ctx.onChatRead?.(chatId);
     return JSON.stringify(result);
   }
 

@@ -275,3 +275,17 @@ export function buildBackfillParams(
     count,
   };
 }
+
+/**
+ * Split a composite chat id ("line:c123") into its platform and platform_id and
+ * resolve the internal row id. Lives here rather than in mcp/tools.ts so that both
+ * the MCP layer and backfill-on-demand can use it without importing each other.
+ */
+export function resolveChatInternalId(db: Database, compositeId: string): number | null {
+  const [platform, ...rest] = compositeId.split(":");
+  const platformId = rest.join(":");
+  const row = db.query<{ id: number }, [string, string]>(
+    "SELECT id FROM chats WHERE platform = ? AND platform_id = ?"
+  ).get(platform, platformId);
+  return row?.id ?? null;
+}

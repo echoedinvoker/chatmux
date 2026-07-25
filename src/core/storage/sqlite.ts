@@ -63,6 +63,7 @@ export function initSchema(db: Database): void {
   `);
 
   migrateChangeColumns(db);
+  migrateBackfillColumns(db);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS attachments (
@@ -102,6 +103,20 @@ function migrateChangeColumns(db: Database): void {
 
   db.exec("UPDATE messages SET seq = id WHERE seq IS NULL");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_seq ON messages(seq)");
+}
+
+/**
+ * Per-chat backfill bookkeeping. NULL means `unknown`: an untouched chat and a chat
+ * migrated from an older DB are indistinguishable, which is the honest reading.
+ */
+function migrateBackfillColumns(db: Database): void {
+  const existing = new Set(
+    db.query<{ name: string }, []>("PRAGMA table_info(chats)").all().map((c) => c.name)
+  );
+
+  if (!existing.has("backfill_state")) db.exec("ALTER TABLE chats ADD COLUMN backfill_state TEXT");
+  if (!existing.has("backfill_attempted_at")) db.exec("ALTER TABLE chats ADD COLUMN backfill_attempted_at INTEGER");
+  if (!existing.has("backfill_oldest_id")) db.exec("ALTER TABLE chats ADD COLUMN backfill_oldest_id TEXT");
 }
 
 const NEXT_SEQ = "(SELECT COALESCE(MAX(seq), 0) + 1 FROM messages)";

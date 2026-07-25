@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { listChats, getMessages, searchMessages, getStatus, getEventsSince, getHeadSeq, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
+import { listChats, getMessages, searchMessages, getStatus, getEventsSince, getHeadSeq, resolveChatInternalId, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
 import type { SafetyRail } from "../safety.js";
 import type { JsonlEvent } from "../storage/jsonl.js";
 
@@ -89,15 +89,6 @@ interface ReadMessagesResult {
   has_more: boolean;
   oldest_timestamp: number | null;
   newest_timestamp: number | null;
-}
-
-function resolveChatInternalId(db: Database, compositeId: string): number | null {
-  const [platform, ...rest] = compositeId.split(":");
-  const platformId = rest.join(":");
-  const row = db.query<{ id: number }, [string, string]>(
-    "SELECT id FROM chats WHERE platform = ? AND platform_id = ?"
-  ).get(platform, platformId);
-  return row?.id ?? null;
 }
 
 function formatMessage(row: MessageRow, db: Database): MessageOutput {

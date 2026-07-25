@@ -27,6 +27,7 @@ import {
 } from "./mcp/tools.js";
 import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
 import { buildBackfillParams } from "./storage/query.js";
+import { needsBackfill, backfillChat, type BackfillDeps } from "./backfill-on-demand.js";
 
 const dataDir = resolve(
   process.env.CHATMUX_DATA_DIR ?? join(process.env.HOME ?? "~", ".local/share/chatmux"),
@@ -74,6 +75,13 @@ const ingestBackfill = makeIngestEvent({
     return true;
   },
 });
+
+const backfillDeps: BackfillDeps = {
+  db,
+  sendRequest: (platform, method, params) => manager.sendRequest(platform, method, params),
+  ingest: (platform, event, source) => ingestBackfill(platform, event, source),
+  notify: (chatId) => subscriptions.notifyMessageReceived(chatId),
+};
 
 const adapterConfigs = loadAdapterConfigs(dataDir);
 console.error(`[daemon] loaded ${adapterConfigs.length} adapter config(s): ${adapterConfigs.map(c => c.platform).join(", ")}`);
@@ -147,6 +155,7 @@ function registerTools(server: McpServer): void {
     },
     async ({ chat_id, limit, before, after }) => {
       const result = handleReadMessages(db, { chat_id, limit, before, after });
+      triggerOnDemandBackfill(chat_id);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
@@ -258,6 +267,17 @@ function registerTools(server: McpServer): void {
   );
 }
 
+/**
+ * Opening a chat is the signal that its history matters. The read itself never waits for
+ * the network — the fetched messages arrive later on the existing push path.
+ */
+function triggerOnDemandBackfill(chatId: string): void {
+  if (!needsBackfill(db, chatId)) return;
+  void backfillChat(backfillDeps, chatId).catch((err) =>
+    console.error(`[daemon] on-demand backfill ${chatId} failed:`, err)
+  );
+}
+
 function registerResources(server: McpServer): void {
   const resourceCtx = () => {
     const adapters: Record<string, { state: string }> = {};
@@ -268,6 +288,7 @@ function registerResources(server: McpServer): void {
 
     return {
       adapters,
+      onChatRead: triggerOnDemandBackfill,
       dbSizeMb: existsSync(dbPath) ? Math.round(statSync(dbPath).size / (1024 * 1024) * 100) / 100 : 0,
       jsonlSizeMb: existsSync(jsonlPath) ? Math.round(statSync(jsonlPath).size / (1024 * 1024) * 100) / 100 : 0,
     };
