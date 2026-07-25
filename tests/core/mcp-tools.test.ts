@@ -4,6 +4,7 @@ import { initSchema, syncEventToSQLite } from "../../src/core/storage/sqlite";
 import { initFTS } from "../../src/core/storage/fts";
 import type { JsonlEvent } from "../../src/core/storage/jsonl";
 import { handleListChats, handleReadMessages, handleSearchMessages, handleSendMessage, handleGetStatus } from "../../src/core/mcp/tools";
+import type { OutgoingDraft } from "../../src/core/mcp/tools";
 import { handleResource, ResourceSubscriptionManager } from "../../src/core/mcp/resources";
 import { SafetyRail } from "../../src/core/safety";
 
@@ -308,6 +309,84 @@ describe("send_message tool", () => {
     expect(result.success).toBe(true);
     expect(result.message_id).toBe("line:m_sent_1");
     expect(result.timestamp).toBe(1690000010000);
+  });
+
+  test("records outgoing draft exactly once after successful send", async () => {
+    const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
+    const drafts: OutgoingDraft[] = [];
+
+    await handleSendMessage(
+      {
+        safetyRail: safety,
+        sendToAdapter: async () => ({ message_id: "m1", timestamp: 1234 }),
+        isAdapterConnected: () => true,
+        recordOutgoing: (d) => { drafts.push(d); },
+      },
+      { chat_id: "line:c_alice", text: "hi" },
+    );
+
+    expect(drafts.length).toBe(1);
+    const draft = drafts[0]!;
+    expect(draft.type).toBe("message");
+    expect(draft.platform).toBe("line");
+    expect(draft.platform_message_id).toBe("m1");
+    expect(draft.chat.platform_id).toBe("c_alice");
+    expect(draft.content).toEqual({ type: "text", text: "hi" });
+    expect(draft.timestamp).toBe(1234);
+    expect(draft.source).toBe("live");
+  });
+
+  test("does not record outgoing when send fails", async () => {
+    const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
+    const drafts: OutgoingDraft[] = [];
+
+    const result = await handleSendMessage(
+      {
+        safetyRail: safety,
+        sendToAdapter: async () => { throw new Error("boom"); },
+        isAdapterConnected: () => true,
+        recordOutgoing: (d) => { drafts.push(d); },
+      },
+      { chat_id: "line:c_alice", text: "hi" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(drafts.length).toBe(0);
+  });
+
+  test("does not record outgoing when adapter is disconnected", async () => {
+    const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
+    const drafts: OutgoingDraft[] = [];
+
+    await handleSendMessage(
+      {
+        safetyRail: safety,
+        sendToAdapter: async () => ({ message_id: "m1", timestamp: 1234 }),
+        isAdapterConnected: () => false,
+        recordOutgoing: (d) => { drafts.push(d); },
+      },
+      { chat_id: "line:c_alice", text: "hi" },
+    );
+
+    expect(drafts.length).toBe(0);
+  });
+
+  test("does not record outgoing when adapter returns no message_id", async () => {
+    const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
+    const drafts: OutgoingDraft[] = [];
+
+    const result = await handleSendMessage(
+      {
+        safetyRail: safety,
+        sendToAdapter: async () => ({ timestamp: 1234 }),
+        isAdapterConnected: () => true,
+        recordOutgoing: (d) => { drafts.push(d); },
+      },
+      { chat_id: "line:c_alice", text: "hi" },
+    );
+
+    expect(result.success).toBe(true);
+    expect(drafts.length).toBe(0);
   });
 
   test("returns error when adapter is not connected", async () => {
