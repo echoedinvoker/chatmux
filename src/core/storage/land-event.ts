@@ -23,28 +23,37 @@ export interface LandEventDeps {
  * backfill 不走這裡：量大（GLOBAL_TARGET = 500）會把 map 灌爆，且它本來就靠 SQLite 的
  * INSERT OR IGNORE。
  *
- * key 含 type：Telegram 的 unsend 重用被收回訊息本身的 platform_message_id（刪除事件沒有
- * 獨立 ID），key 不含 type 時「收到訊息後 60 秒內收回」的 unsend 會命中原訊息的 key 而被
- * 靜默吃掉。兩條路徑要防的回吐撞擊 type 都是 message，加上 type 對它無損。
+ * dedup 只守 message：這個 map 存在的唯一目的是防「core 主動落地的送出訊息」與「adapter 回吐
+ * 的同一則」互撞，而那個 race 只發生在 message。變更事件沒有兩條來源路徑，一開始就不需要去重。
+ * 曾經改成「key 含 type」想擋掉 unsend 被原訊息 key 吃掉的問題，但那只治了 unsend——Telegram 的
+ * edit 同樣重用原訊息 ID，串流 bot 一則訊息在 60 秒內連編十次，key `edit:tg:4484` 只有第一次
+ * 進得來，其餘九次連 log 都沒有。代價是同一則 unsend 真的送兩次時 JSONL 會多一行，而套用是
+ * 冪等的，SQLite 結果不變。
  *
- * notify 只對 message：unsend / read_receipt 不改變 SQLite 中 consumer 讀得到的狀態。
+ * notify 涵蓋 message / edit / unsend：三者都改變了 consumer 讀得到的 SQLite 狀態。
+ * read_receipt 不改，仍不推播。
  */
+const NOTIFYING_TYPES = new Set(["message", "edit", "unsend"]);
+
 export function makeLandEvent(deps: LandEventDeps): (event: JsonlEvent) => boolean {
   const landedKeys = new Map<string, number>();
 
   return function landEvent(event: JsonlEvent): boolean {
+    const deduped = event.type === "message";
     const key = `${event.type}:${event.platform}:${event.platform_message_id}`;
     const now = Date.now();
     for (const [k, t] of landedKeys) if (now - t > LANDED_TTL_MS) landedKeys.delete(k);
-    if (landedKeys.has(key)) return false;
-    landedKeys.set(key, now);
+    if (deduped) {
+      if (landedKeys.has(key)) return false;
+      landedKeys.set(key, now);
+    }
 
     // JSONL 是 truth source。它失敗 ＝ 什麼都沒寫 → 復原 key，讓另一條路徑或重試能補。
     // 本函式全同步無 await，delete 不會重新引入原本要防的 race。
     try {
       deps.jsonl.append(event);
     } catch (err) {
-      landedKeys.delete(key);
+      if (deduped) landedKeys.delete(key);
       throw err;
     }
 
@@ -57,9 +66,7 @@ export function makeLandEvent(deps: LandEventDeps): (event: JsonlEvent) => boole
       console.error("[daemon] landed to JSONL but SQLite sync failed (syncCheck will recover on restart):", err);
     }
 
-    // 只有 message 改變了 consumer 讀得到的 SQLite 狀態。unsend / read_receipt 發推播
-    // 只會讓 chat.nvim 白跑一趟 re-read。
-    if (event.type === "message") {
+    if (NOTIFYING_TYPES.has(event.type)) {
       deps.subscriptions.notifyMessageReceived(`${event.platform}:${event.chat.platform_id}`);
     }
     return true;

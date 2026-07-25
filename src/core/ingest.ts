@@ -54,6 +54,7 @@ export function makeIngestEvent(
       const raw = params as RawEvent;
       const type = nonEmptyString(raw.type) ? raw.type : "";
       const isMessage = type === "message";
+      const isEdit = type === "edit";
 
       if (!nonEmptyString(raw.platform_message_id)) {
         log(`[daemon] [${platform}] WARN: dropped ${type || "event"} — missing platform_message_id`);
@@ -68,6 +69,15 @@ export function makeIngestEvent(
       if (isMessage && (!isObject(raw.content) || !nonEmptyString(raw.content.type))) {
         log(
           `[daemon] [${platform}] WARN: dropped message ${raw.platform_message_id} — missing content.type`,
+        );
+        return "dropped";
+      }
+      // edit 帶的是編輯後的完整內容。缺 text 的 edit 多半是媒體訊息的 caption 編輯——
+      // adapter 的媒體分支產不出 content.text，那個情境不在支援範圍（見 protocol v0.5）。
+      // 沒有 sender 檢查：core 不使用 edit 的 sender，多數 adapter 不會帶。
+      if (isEdit && (!isObject(raw.content) || !nonEmptyString(raw.content.type) || typeof raw.content.text !== "string")) {
+        log(
+          `[daemon] [${platform}] WARN: dropped edit ${raw.platform_message_id} — missing content.type or content.text`,
         );
         return "dropped";
       }
@@ -133,6 +143,11 @@ function logEvent(
       log(`${prefix}WARN: event missing display_name`, raw.sender?.platform_id);
     }
     log(`${prefix}event: ${String(raw.content?.type)} from ${String(displayName ?? raw.sender?.platform_id)}`);
+    return;
+  }
+
+  if (type === "edit") {
+    log(`${prefix}edit: message ${String(raw.platform_message_id)} updated`);
     return;
   }
 

@@ -23,6 +23,19 @@ export function initFTS(db: Database): void {
       INSERT INTO messages_fts(messages_fts, rowid, content_text) VALUES ('delete', old.id, old.content_text);
     END
   `);
+
+  // External-content FTS5 has no implicit UPDATE path: editing content_text would leave the
+  // old terms indexed, so a retracted message would still be findable by the text its author
+  // just withdrew. The 'delete' command must carry the exact value that was indexed (the
+  // insert trigger stores new.content_text verbatim, NULLs included, so old.content_text is
+  // symmetric) — a mismatch corrupts the index silently.
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages
+    BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content_text) VALUES ('delete', old.id, old.content_text);
+      INSERT INTO messages_fts(rowid, content_text) VALUES (new.id, new.content_text);
+    END
+  `);
 }
 
 export interface FTSResult {

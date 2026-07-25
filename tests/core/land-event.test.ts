@@ -75,19 +75,53 @@ describe("landEvent", () => {
     expect(appended.length).toBe(1);
   });
 
-  test("only notifies subscribers for message events", () => {
+  test("notifies subscribers for every event that changes stored state", () => {
     const { appended, notified, deps } = makeDeps();
     const landEvent = makeLandEvent(deps);
 
     expect(landEvent(makeEvent({ type: "unsend", platform_message_id: "u1" }))).toBe(true);
-    expect(notified).toEqual([]);
-
+    expect(landEvent(makeEvent({ type: "edit", platform_message_id: "e1" }))).toBe(true);
     expect(landEvent(makeEvent({ platform_message_id: "m9" }))).toBe(true);
-    expect(notified).toEqual(["line:c1"]);
+
+    expect(notified).toEqual(["line:c1", "line:c1", "line:c1"]);
+    expect(appended.length).toBe(3);
+  });
+
+  test("does not notify subscribers for read_receipt", () => {
+    const { notified, deps } = makeDeps();
+    const landEvent = makeLandEvent(deps);
+
+    expect(landEvent(makeEvent({ type: "read_receipt", platform_message_id: "r1" }))).toBe(true);
+    expect(notified).toEqual([]);
+  });
+
+  test("consecutive edits of the same message all land (streaming bot)", () => {
+    const { appended, notified, deps } = makeDeps();
+    const landEvent = makeLandEvent(deps);
+
+    // 串流 bot 在 60s TTL 窗口內反覆編輯同一則訊息；dedup 只該防 message 的雙路徑回吐
+    for (let i = 0; i < 5; i++) {
+      expect(
+        landEvent(makeEvent({ type: "edit", platform_message_id: "4484", content: { type: "text", text: `chunk ${i}` } })),
+      ).toBe(true);
+    }
+
+    expect(appended.length).toBe(5);
+    expect(notified.length).toBe(5);
+  });
+
+  test("repeated unsends of the same message are not swallowed by dedup", () => {
+    const { appended, deps } = makeDeps();
+    const landEvent = makeLandEvent(deps);
+
+    expect(landEvent(makeEvent({ type: "unsend", platform_message_id: "777" }))).toBe(true);
+    expect(landEvent(makeEvent({ type: "unsend", platform_message_id: "777" }))).toBe(true);
+
+    // 落地兩行是可接受的代價：套用是冪等的，SQLite 結果不變
     expect(appended.length).toBe(2);
   });
 
-  test("an unsend is not shadowed by the message it retracts (key includes type)", () => {
+  test("an unsend is not shadowed by the message it retracts", () => {
     const { appended, notified, deps } = makeDeps();
     const landEvent = makeLandEvent(deps);
 
@@ -98,7 +132,7 @@ describe("landEvent", () => {
     ).toBe(true);
 
     expect(appended.length).toBe(2);
-    expect(notified.length).toBe(1);
+    expect(notified.length).toBe(2);
   });
 
   test("treats different platform_message_id as distinct events", () => {

@@ -194,6 +194,56 @@ describe("ingestEvent — 畸形事件不炸、不影響同批其他事件", () 
     expect(landed.length).toBe(0);
   });
 
+  test("edit 事件：無 sender 也落地，log 指出被更新的訊息", () => {
+    const { landed, logs, deps } = makeIngestDeps();
+    const ingest = makeIngestEvent(deps);
+
+    const payload = {
+      type: "edit",
+      platform: "telegram",
+      platform_message_id: "4484",
+      chat: { platform_id: "-100123" },
+      timestamp: 1753450000000,
+      content: { type: "text", text: "最終答案" },
+    };
+
+    expect(ingest("telegram", payload, "live")).toBe("landed");
+    expect(landed[0]!.content.text).toBe("最終答案");
+    expect(logs.some((l) => l.includes("edit: message 4484 updated"))).toBe(true);
+  });
+
+  test("edit 缺 content.text（媒體 caption 編輯）：丟棄且不呼叫 land", () => {
+    const { landed, logs, deps } = makeIngestDeps();
+    const ingest = makeIngestEvent(deps);
+
+    const payload = {
+      type: "edit",
+      platform: "telegram",
+      platform_message_id: "4485",
+      chat: { platform_id: "-100123" },
+      timestamp: 1753450000000,
+      content: { type: "image", media_url: null },
+    };
+
+    expect(ingest("telegram", payload, "live")).toBe("dropped");
+    expect(landed.length).toBe(0);
+    expect(logs.some((l) => l.includes("dropped edit 4485"))).toBe(true);
+  });
+
+  test("edit 完全沒有 content：丟棄", () => {
+    const { landed, deps } = makeIngestDeps();
+    const ingest = makeIngestEvent(deps);
+
+    expect(
+      ingest(
+        "telegram",
+        { type: "edit", platform: "telegram", platform_message_id: "4486", chat: { platform_id: "-100123" } },
+        "live",
+      ),
+    ).toBe("dropped");
+    expect(landed.length).toBe(0);
+  });
+
   test("params 不是物件：丟棄，不拋出", () => {
     const { landed, deps } = makeIngestDeps();
     const ingest = makeIngestEvent(deps);

@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { JsonlWriter, type JsonlEvent } from "./storage/jsonl.js";
 import { initSchema, syncEventToSQLite } from "./storage/sqlite.js";
+import { replayJsonl } from "./storage/replay.js";
 import { initFTS } from "./storage/fts.js";
 import { makeLandEvent } from "./storage/land-event.js";
 import { makeIngestEvent } from "./ingest.js";
@@ -462,37 +463,23 @@ async function backfillAdapter(platform: string): Promise<void> {
   console.error(`[daemon] [${platform}] cold start complete. ${totalBackfilled} messages backfilled.`);
 }
 
+/**
+ * Re-project the JSONL tail so SQLite catches up on anything the last run dropped.
+ *
+ * The previous version only replayed `message` events it could not find in the table. That
+ * test is meaningless for change events: an edit's target row exists by definition, so it was
+ * always judged "not missing" and never replayed. Replaying the whole tail unconditionally is
+ * correct instead because every branch of the projection is idempotent — messages via
+ * INSERT OR IGNORE, unsend by refusing to re-stamp an already retracted row, edits by
+ * short-circuiting when content and edited_at already match. Without that edit short-circuit
+ * every restart would bump seq and hand pull consumers an event with no state change.
+ */
 function syncCheck(): void {
   const tailEvents = jsonl.readTailLines(100);
   if (tailEvents.length === 0) return;
 
-  const platformIds = tailEvents
-    .filter((e) => e.type === "message")
-    .map((e) => e.platform_message_id);
-
-  if (platformIds.length === 0) return;
-
-  const placeholders = platformIds.map(() => "?").join(",");
-  const found = db
-    .query<{ platform_message_id: string }, string[]>(
-      `SELECT platform_message_id FROM messages WHERE platform_message_id IN (${placeholders})`
-    )
-    .all(...platformIds);
-
-  const foundSet = new Set(found.map((r) => r.platform_message_id));
-  const missing = platformIds.filter((id) => !foundSet.has(id));
-
-  if (missing.length > 0) {
-    console.error(`[daemon] sync check: ${missing.length} JSONL events missing from SQLite, re-syncing...`);
-    for (const event of tailEvents) {
-      if (event.type === "message" && missing.includes(event.platform_message_id)) {
-        syncEventToSQLite(db, event);
-      }
-    }
-    console.error("[daemon] sync check: re-sync complete");
-  } else {
-    console.error("[daemon] sync check: OK");
-  }
+  replayJsonl(db, tailEvents);
+  console.error(`[daemon] sync check: replayed ${tailEvents.length} tail events`);
 }
 
 // 執行期的 async 漏網不該打掉整個長駐 service（所有 MCP 連線斷掉 + 冷啟動重跑 backfill）。
