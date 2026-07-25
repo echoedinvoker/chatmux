@@ -91,9 +91,10 @@ export function needsBackfill(db: Database, chatId: string, now: number = Date.n
     case "unavailable":
       return chat.attemptedAt == null || now - chat.attemptedAt >= UNAVAILABLE_COOLDOWN_MS;
     case "partial":
-      return chat.attemptedAt == null || now - chat.attemptedAt >= PARTIAL_COOLDOWN_MS;
     default:
-      return true;
+      // `unknown` covers both "never asked" and "asked and learned nothing", so it shares
+      // the cooldown: without one, an open buffer would re-ask on every push.
+      return chat.attemptedAt == null || now - chat.attemptedAt >= PARTIAL_COOLDOWN_MS;
   }
 }
 
@@ -141,9 +142,12 @@ export async function backfillChat(deps: BackfillDeps, chatId: string): Promise<
 
     let state: BackfillState;
     if (!progressed) {
-      // Nothing older arrived. With an anchor that means the chat bottoms out here;
-      // without one the platform declined to hand over any history at all.
-      state = before ? "exhausted" : "unavailable";
+      // With an anchor, nothing older arriving is ambiguous: LINE echoes the anchor back
+      // whether the chat truly bottoms out or the platform is withholding the rest. Saying
+      // `exhausted` would render as "this is everything" — a claim we cannot support, and
+      // a worse outcome than silence. Without an anchor there is nothing to withhold, so
+      // an empty answer really does mean the history is not available to this device.
+      state = before ? "unknown" : "unavailable";
     } else {
       state = result?.has_more ? "partial" : "exhausted";
     }

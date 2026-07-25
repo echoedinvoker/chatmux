@@ -172,10 +172,36 @@ Daemon starts
           guessed, get_chats is the sole authority
     → backfill: walk chats by last_message_time descending, 50 messages per round
       → stops as soon as a global counter hits 500 (does not finish every chat)
-      → runs another round if the first pass stayed under 500 and chats remain
+      → one pass only — the rest of history is fetched on demand (below)
   → MCP Server starts
   → begins listening for live push events
 ```
+
+### On-demand backfill
+
+Cold start only reaches the chats that sort first, so opening any other chat used to show
+whatever happened to be in the database — often one message, or none. Reading a chat now
+fetches the rest:
+
+```
+read_messages / chat://chats/{id}/messages
+  → answer from SQLite immediately (this path never waits on the network)
+  → needsBackfill? → fire-and-forget backfillChat(chat_id)
+      → anchor = oldest stored message for the chat (id + timestamp)
+      → adapter backfill, one batch of 50 — never a loop
+      → ingestBackfill lands the events (UNIQUE + INSERT OR IGNORE dedupes)
+      → record what was learned in chats.backfill_state
+      → notify subscribers → consumer re-reads → the buffer fills in
+```
+
+The trigger sits in core rather than in each consumer, so anything speaking MCP — including
+Claude Code connecting directly — gets the same behaviour without implementing it.
+
+Three limits keep the loop from feeding itself, since a backfill pushes, a push causes a
+re-read, and a re-read is a trigger: one in-flight fetch per chat, at most two across all
+chats, and a 60-second window after a fetch during which that chat will not trigger again.
+Walking further back is the user opening the chat again, not the daemon paging in the
+background.
 
 ## Component responsibilities
 

@@ -44,6 +44,18 @@ describe("needsBackfill", () => {
     expect(needsBackfill(db, chatId, NOW)).toBe(true);
   });
 
+  // `unknown` is now also where a stalled anchored chat lands, so it needs a cooldown or
+  // an open buffer would re-ask the platform on every push.
+  test("unknown that was just attempted → false", () => {
+    const chatId = makeChat(db, "c_stalled", null, NOW - 1000);
+    expect(needsBackfill(db, chatId, NOW)).toBe(false);
+  });
+
+  test("unknown past the partial cooldown → true", () => {
+    const chatId = makeChat(db, "c_stalled2", null, NOW - PARTIAL_COOLDOWN_MS - 1000);
+    expect(needsBackfill(db, chatId, NOW)).toBe(true);
+  });
+
   test("exhausted → false, no matter how long ago", () => {
     const chatId = makeChat(db, "c_done", "exhausted", NOW - UNAVAILABLE_COOLDOWN_MS * 10);
     expect(needsBackfill(db, chatId, NOW)).toBe(false);
@@ -191,7 +203,11 @@ describe("backfillChat state machine", () => {
     expect(stateOf("c_done").backfill_state).toBe("exhausted");
   });
 
-  test("an anchored chat that returns only the anchor → exhausted, not unavailable", async () => {
+  // One call cannot tell "the chat bottoms out here" from "the platform withheld the
+  // rest": both come back as the anchor echoed with nothing older. Claiming `exhausted`
+  // picks one and shows the user "this is everything" — the exact lie this feature exists
+  // to remove. So we claim nothing.
+  test("an anchored chat that returns only the anchor → unknown, never exhausted", async () => {
     const chatId = makeChat(db, "c_bottom", null);
     syncEventToSQLite(db, makeEvent("c_bottom", "m_only", 5000) as any);
 
@@ -204,7 +220,36 @@ describe("backfillChat state machine", () => {
       chatId
     );
 
-    expect(stateOf("c_bottom").backfill_state).toBe("exhausted");
+    expect(stateOf("c_bottom").backfill_state).toBe("unknown");
+    // Nothing landed and nothing was learned — pushing would only restart the loop.
+    expect(notified).toEqual([]);
+  });
+
+  test("a chat with no anchor at all still reports unavailable", async () => {
+    const chatId = makeChat(db, "c_void", null);
+
+    await backfillChat(
+      makeDeps(db, () => ({ events: [], has_more: false }), notified),
+      chatId
+    );
+
+    expect(stateOf("c_void").backfill_state).toBe("unavailable");
+  });
+
+  test("exhausted still means exhausted when history actually moved", async () => {
+    const chatId = makeChat(db, "c_walked", null);
+    syncEventToSQLite(db, makeEvent("c_walked", "m_9", 9000) as any);
+
+    await backfillChat(
+      makeDeps(
+        db,
+        () => ({ events: [makeEvent("c_walked", "m_1", 1000)], has_more: false }),
+        notified
+      ),
+      chatId
+    );
+
+    expect(stateOf("c_walked").backfill_state).toBe("exhausted");
   });
 
   test("a request that throws never writes unavailable — only the attempt time moves", async () => {

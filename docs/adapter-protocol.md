@@ -379,7 +379,9 @@ Each entry in `events` has the same shape as an `event` notification's params.
 1. Take the chat list and sort by last message time, descending.
 2. Call backfill per chat, `count=50` per round.
 3. Accumulate into a global counter and stop at 500 — without necessarily visiting every chat.
-4. If the first pass stayed under 500 and chats remain unexhausted, run another round, until the global count reaches 500 or every chat is exhausted.
+4. Stop there. A single pass is deliberate: walking further back on start would spend the
+   budget on whatever happens to sort first, and history is fetched on demand when a chat is
+   actually opened (see `before_message_id` above). There is no second round.
 
 **Backfill interleaving with live events**: backfill and live push can produce events with
 the same message ID. Core's Storage deduplicates with `INSERT OR IGNORE` against a UNIQUE

@@ -80,6 +80,9 @@ CREATE TABLE chats (
   type TEXT NOT NULL CHECK(type IN ('direct', 'group', 'room')),
   name TEXT,
   last_message_at INTEGER,
+  backfill_state TEXT,             -- unknown|partial|exhausted|unavailable (NULL = unknown)
+  backfill_attempted_at INTEGER,   -- ms; set on every attempt, success or failure
+  backfill_oldest_id TEXT,         -- anchor used last time, to detect a stalled walk
   raw TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
@@ -94,6 +97,14 @@ table has a display name for it, it is a direct chat". That happens to hold on L
 (1799 contacts) and misclassifies every DM as a group on any platform where contacts are
 sparse or the fetch failed. Chats that `get_chats` did not report are now skipped with a
 WARN rather than invented.
+
+**`backfill_state` is a claim made to the user**, not bookkeeping: it surfaces as
+`history.state` on `read_messages` and becomes a line above the chat buffer. `exhausted`
+renders as "this is everything", so it is written **only when a fetch actually walked the
+history back** — an anchored chat that returns nothing older stays `unknown`, because one
+call cannot distinguish a chat that bottoms out from a platform withholding the rest.
+`unavailable` is reserved for a chat with no anchor at all that came back empty; a network
+error or a disconnected adapter must never be recorded as either.
 
 **NULL semantics for `last_message_at`**: NULL means "the adapter gave no ordering
 signal", not "a long time ago". Writes guard existing values with
