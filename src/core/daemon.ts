@@ -9,6 +9,7 @@ import { JsonlWriter, type JsonlEvent } from "./storage/jsonl.js";
 import { initSchema, syncEventToSQLite } from "./storage/sqlite.js";
 import { initFTS } from "./storage/fts.js";
 import { makeLandEvent } from "./storage/land-event.js";
+import { makeIngestEvent } from "./ingest.js";
 import { SafetyRail } from "./safety.js";
 import { isMethodNotFound, type SpawnResult } from "./adapter-runner.js";
 import { AdapterManager } from "./adapter-manager.js";
@@ -61,6 +62,17 @@ const landEvent = makeLandEvent({
   subscriptions,
 });
 
+// live 走 landEvent（含跨路徑去重）；backfill 維持原本的直寫，不進 dedup map
+// （量大會把 map 灌爆，且它本來就靠 SQLite 的 INSERT OR IGNORE）。
+const ingestLive = makeIngestEvent({ land: landEvent });
+const ingestBackfill = makeIngestEvent({
+  land: (event) => {
+    jsonl.append(event);
+    syncEventToSQLite(db, event);
+    return true;
+  },
+});
+
 const adapterConfigs = loadAdapterConfigs(dataDir);
 console.error(`[daemon] loaded ${adapterConfigs.length} adapter config(s): ${adapterConfigs.map(c => c.platform).join(", ")}`);
 
@@ -91,23 +103,10 @@ const manager = new AdapterManager(adapterConfigs, {
   },
 });
 
-manager.onEvent(async (platform: string, params: unknown) => {
-  const event = params as JsonlEvent;
-  event.source = "live";
-  event.received_at = Date.now();
-  if (!event.sender.display_name) {
-    console.error(`[daemon] WARN: event missing display_name`, event.sender.platform_id);
-  }
-
-  try {
-    if (landEvent(event)) {
-      console.error(`[daemon] [${platform}] event: ${event.content.type} from ${event.sender.display_name}`);
-    } else {
-      console.error(`[daemon] [${platform}] deduped echo: ${event.platform_message_id}`);
-    }
-  } catch (err) {
-    console.error(`[daemon] [${platform}] event processing error:`, err);
-  }
+// 同步 handler：onEvent 的型別是 => void，async handler 回傳的 promise 沒有任何人持有，
+// 是 unhandled rejection 逸出（daemon exit 1）的載體。改成同步後這條路徑連 promise 都沒有。
+manager.onEvent((platform: string, params: unknown) => {
+  ingestLive(platform, params, "live");
 });
 
 manager.onStatus((platform: string, params: unknown) => {
@@ -448,15 +447,11 @@ async function backfillAdapter(platform: string): Promise<void> {
       }) as { events: JsonlEvent[]; has_more: boolean };
 
       for (const event of result.events) {
-        event.source = "backfill";
-        event.received_at = Date.now();
-        if (!event.sender.display_name) {
-          console.error(`[daemon] [${platform}] WARN: backfill event missing display_name`, event.sender.platform_id);
-        }
-        jsonl.append(event);
-        syncEventToSQLite(db, event);
+        ingestBackfill(platform, event, "backfill");
       }
 
+      // 維持 result.events.length：這是對上游平台的請求配額語意（GLOBAL_TARGET），
+      // 不是落地筆數。改成只計已落地會讓同樣預算向平台多要訊息。
       totalBackfilled += result.events.length;
       console.error(`[daemon] [${platform}] backfill ${chat.platform_id}: ${result.events.length} msgs (total: ${totalBackfilled})`);
     } catch (err) {

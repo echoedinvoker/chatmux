@@ -22,12 +22,18 @@ export interface LandEventDeps {
  *
  * backfill 不走這裡：量大（GLOBAL_TARGET = 500）會把 map 灌爆，且它本來就靠 SQLite 的
  * INSERT OR IGNORE。
+ *
+ * key 含 type：Telegram 的 unsend 重用被收回訊息本身的 platform_message_id（刪除事件沒有
+ * 獨立 ID），key 不含 type 時「收到訊息後 60 秒內收回」的 unsend 會命中原訊息的 key 而被
+ * 靜默吃掉。兩條路徑要防的回吐撞擊 type 都是 message，加上 type 對它無損。
+ *
+ * notify 只對 message：unsend / read_receipt 不改變 SQLite 中 consumer 讀得到的狀態。
  */
 export function makeLandEvent(deps: LandEventDeps): (event: JsonlEvent) => boolean {
   const landedKeys = new Map<string, number>();
 
   return function landEvent(event: JsonlEvent): boolean {
-    const key = `${event.platform}:${event.platform_message_id}`;
+    const key = `${event.type}:${event.platform}:${event.platform_message_id}`;
     const now = Date.now();
     for (const [k, t] of landedKeys) if (now - t > LANDED_TTL_MS) landedKeys.delete(k);
     if (landedKeys.has(key)) return false;
@@ -51,7 +57,11 @@ export function makeLandEvent(deps: LandEventDeps): (event: JsonlEvent) => boole
       console.error("[daemon] landed to JSONL but SQLite sync failed (syncCheck will recover on restart):", err);
     }
 
-    deps.subscriptions.notifyMessageReceived(`${event.platform}:${event.chat.platform_id}`);
+    // 只有 message 改變了 consumer 讀得到的 SQLite 狀態。unsend / read_receipt 發推播
+    // 只會讓 chat.nvim 白跑一趟 re-read。
+    if (event.type === "message") {
+      deps.subscriptions.notifyMessageReceived(`${event.platform}:${event.chat.platform_id}`);
+    }
     return true;
   };
 }
