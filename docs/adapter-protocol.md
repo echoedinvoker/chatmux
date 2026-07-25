@@ -425,6 +425,16 @@ extract a serializable subset.
 - If a platform deletes several messages at once (Telegram's `MessageDeleted` carries multiple IDs), the adapter should emit one unsend notification per deleted message.
 - Some platforms omit `chat_id` on deletions in private chats. The adapter should skip those events and log a warning to stderr.
 
+**Core's event ingest contract:**
+
+Core handles every event independently, so a malformed one costs you only that event. An adapter can rely on the following, regardless of which ingest path (live push or backfill) the event arrives on:
+
+- **Per-event isolation.** A malformed event never terminates the daemon and never aborts the remaining events in the same backfill batch.
+- **Required fields.** `platform_message_id` and `chat.platform_id` are required for every event type. A `message` additionally requires `content.type` and `sender.platform_id`. Events missing these are dropped with a warning on stderr — they are not written to storage.
+- **`chat.type` is not required** for non-`message` events. Core fills in `"unknown"` internally to satisfy its storage type; that value is never written to the chats table and carries no meaning.
+- **Unknown `type` values are preserved, not dropped.** Core writes them to the JSONL event log and logs a warning. A future protocol version can add event types without older cores discarding them.
+- **Only `message` events notify subscribers.** `unsend` and `read_receipt` change no state that consumers read, so they are logged and stored but trigger no push.
+
 ### `status`
 
 A change in adapter connection state.

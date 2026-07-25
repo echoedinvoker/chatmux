@@ -79,6 +79,8 @@ LINE pushes a message
   → LINE Adapter receives it and decrypts E2EE
   → stdio notification: { method: "event", params: { type: "message", ... } }
   → Core Adapter Runner receives the event
+  → Ingest boundary (src/core/ingest.ts): validate shape, isolate per event
+      → malformed → warn and drop; the daemon and the rest of the batch are unaffected
   → Storage: landEvent (the single landing entry point, see below)
       → append to JSONL (truth source)
       → INSERT OR IGNORE into SQLite (query view, deduped by UNIQUE constraint)
@@ -111,8 +113,15 @@ happens to echo it back — LINE does, Telegram does not.
 
 Both paths above funnel through `landEvent` (`src/core/storage/land-event.ts`), never
 appending on their own. It keeps an in-memory map of recently landed
-`platform:platform_message_id` keys (60 s TTL) and lands whichever path arrives first,
+`type:platform:platform_message_id` keys (60 s TTL) and lands whichever path arrives first,
 dropping the other with a `deduped echo` log line.
+
+The key includes `type` because an `unsend` reuses the ID of the message it retracts —
+Telegram's deletion events carry no ID of their own. Without `type` in the key, deleting a
+message within the 60 s window would land on the original message's key and vanish silently.
+
+Only `message` events notify subscribers. `unsend` and `read_receipt` change nothing a
+consumer reads, so pushing on them would only trigger a wasted re-read.
 
 The deduplication exists for JSONL, not SQLite. SQLite absorbs duplicates through
 `INSERT OR IGNORE`; the append-only log has no such defence, and a duplicated line in the

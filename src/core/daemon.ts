@@ -495,6 +495,16 @@ function syncCheck(): void {
   }
 }
 
+// 執行期的 async 漏網不該打掉整個長駐 service（所有 MCP 連線斷掉 + 冷啟動重跑 backfill）。
+// 大聲記錄後繼續跑。不加 uncaughtException——同步例外代表 call stack 已在未知狀態中斷，
+// 帶病續跑比重啟危險。main().catch 的 exit(1) 保留：那是啟動失敗，該死。
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "[daemon] UNHANDLED REJECTION (daemon stays up; investigate):",
+    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+  );
+});
+
 async function main(): Promise<void> {
   console.error("[daemon] starting adapters...");
 

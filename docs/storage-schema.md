@@ -246,12 +246,16 @@ END;
 Two things write here: an incoming event from an adapter, and core landing a message the
 user just sent (a successful `send_message` produces an event of its own). Both go through
 `landEvent` (`src/core/storage/land-event.ts`), which is where the deduplication below
-happens. Backfill bypasses it and appends directly.
+happens. Backfill bypasses it and appends directly — 500 backfilled events would flood the
+in-memory key map, and SQLite's `INSERT OR IGNORE` already covers that path. Both paths
+still share the ingest boundary (`src/core/ingest.ts`) above `landEvent`, so shape
+validation and per-event isolation apply to backfill too.
 
 ```
 landEvent(event)  ← from an adapter stdio notification, or from a successful send
   │
-  ├─ 0. Deduplicate on `platform:platform_message_id` (in-memory, 60 s TTL)
+  ├─ 0. Deduplicate on `type:platform:platform_message_id` (in-memory, 60 s TTL)
+  │     `type` is part of the key: an unsend reuses the retracted message's ID.
   │     Already seen → return, write nothing. Otherwise record the key and continue.
   │
   ├─ 1. Append to JSONL (truth source; always succeeds unless the disk is full)
