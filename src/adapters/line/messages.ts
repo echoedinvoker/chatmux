@@ -12,6 +12,7 @@ export interface RawMessage {
 
 export interface MessageClient {
   myMid: string;
+  myDisplayName: string;
   decryptMessage(msg: RawMessage): Promise<RawMessage>;
   sendCompactMessage(
     to: string,

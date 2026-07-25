@@ -9,6 +9,7 @@ import {
 function createMockClient(overrides?: Partial<MessageClient>): MessageClient {
   return {
     myMid: "u_me_mid_12345",
+    myDisplayName: "Me",
     async decryptMessage(msg) {
       return { ...msg, text: msg.text ?? "[decrypted]" };
     },

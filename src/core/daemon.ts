@@ -267,8 +267,29 @@ function registerResources(server: McpServer): void {
   });
 }
 
+/** Who "we" are on each platform, filled by the optional `get_self` request. */
+const selfByPlatform = new Map<string, { platform_id: string; display_name: string }>();
+
 async function coldStartAdapter(platform: string): Promise<void> {
   console.error(`[daemon] [${platform}] starting cold start flow...`);
+
+  try {
+    const self = await manager.sendRequest(platform, "get_self", {}) as {
+      platform_id: string;
+      display_name: string;
+    };
+    selfByPlatform.set(platform, self);
+    console.error(`[daemon] [${platform}] self: ${self.display_name} (${self.platform_id})`);
+  } catch (err) {
+    if (isMethodNotFound(err)) {
+      console.error(`[daemon] [${platform}] get_self not supported (optional), skipping`);
+    } else {
+      console.error(
+        `[daemon] [${platform}] get_self failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
 
   try {
     const contactsResult = await manager.sendRequest(platform, "get_contacts", {}) as {

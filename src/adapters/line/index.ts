@@ -216,6 +216,18 @@ async function main(): Promise<void> {
     return handleSendMessage(lineClient, params as any);
   });
 
+  responder.onRequest("get_self", async () => {
+    if (!lineClient) throw new Error("Client not initialized");
+    const self = {
+      platform_id: lineClient.myMid,
+      display_name: lineClient.myDisplayName,
+    };
+    // Lets enrichSenderName resolve our own outgoing messages instead of
+    // falling back to the raw MID.
+    contactCache.addContacts([{ mid: self.platform_id, displayName: self.display_name }]);
+    return self;
+  });
+
   responder.onRequest("backfill", async (params: unknown) => {
     if (!lineClient) throw new Error("Client not initialized");
     return handleBackfill(lineClient, params as any);
@@ -260,6 +272,7 @@ async function main(): Promise<void> {
 
     lineClient = {
       myMid: client.base.profile!.mid,
+      myDisplayName: client.base.profile!.displayName,
       async decryptMessage(msg: any) {
         try {
           return await client.base.e2ee.decryptE2EEMessage(msg);
