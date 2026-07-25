@@ -74,7 +74,7 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 |------|-------------|
 | `list_chats` | List chats with last message preview, search, pagination |
 | `read_messages` | Read messages from a chat, paginated by timestamp |
-| `read_events` | Tail the event log from an opaque cursor — resumable, survives backfill reordering |
+| `read_events` | Tail the event log from an opaque cursor — resumable, survives backfill reordering, and re-delivers a message when it is edited or retracted |
 | `search_messages` | Full-text search (CJK supported via FTS5 trigram + LIKE fallback) |
 | `send_message` | Send message through SafetyRail (rate-limited, error-tracked) |
 | `get_status` | System status: adapter connection + storage stats |

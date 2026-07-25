@@ -1,7 +1,7 @@
 # Adapter Protocol
 
-> **Protocol version**: 0.4
-> **Validated against**: LINE (v0.1, v0.4), Telegram (v0.2, v0.3, v0.4)
+> **Protocol version**: 0.5
+> **Validated against**: LINE (v0.1, v0.4, v0.5), Telegram (v0.2, v0.3, v0.4, v0.5)
 > **Changelog**: at the bottom of this document
 
 A chatmux adapter is a child process that talks to the core daemon over
@@ -137,6 +137,12 @@ platform-specific data. The Telegram adapter, for instance, keeps its session at
   }
 }
 ```
+
+`supported_events` is the subset of the [event type enum](#event-type-enum) this adapter
+emits. The example above is the LINE adapter, which has no notion of editing a sent
+message and therefore does not list `"edit"` — an adapter declares only what its platform
+actually supports. The Telegram adapter reports
+`["message", "edit", "unsend"]`.
 
 `platform_rate_limits` is optional. When reported, core's SafetyRail takes whichever is
 stricter — its own default or the adapter's value. **An adapter can only tighten, never
@@ -379,8 +385,8 @@ another 3 seconds, then SIGKILL.
 
 ### `event`
 
-A platform event. This is the central notification — new messages, read receipts, and
-unsends all travel through it.
+A platform event. This is the central notification — new messages, edits, read receipts,
+and unsends all travel through it.
 
 **Params:**
 ```json
@@ -418,22 +424,36 @@ extract a serializable subset.
 | `message` | A new message | `{ type: "text"\|"image"\|"video"\|"audio"\|"sticker"\|"file", text?, media_url?, sticker_id?, file_name? }` |
 | `read_receipt` | Read receipt (deferred in v0.2: semantics differ per platform, so support is at the adapter's discretion) | `{ chat_id, read_up_to: timestamp }` |
 | `unsend` | A retracted message | `{ message_id }` |
+| `edit` (optional, since v0.5) | An already-delivered message whose content changed | Same shape as `message` — the **full** new content, not a diff |
 
 **Notes on `unsend`:**
 
-- `timestamp` may be 0 or null — some platforms, Telegram included, do not report when the deletion happened. Core tolerates this.
+- `timestamp` may be 0 or null — some platforms, Telegram included, do not report when the deletion happened. Core tolerates this and falls back to the event's arrival time, because `retracted_at = 0` is indistinguishable from "not retracted" in every truthiness check.
 - If a platform deletes several messages at once (Telegram's `MessageDeleted` carries multiple IDs), the adapter should emit one unsend notification per deleted message.
 - Some platforms omit `chat_id` on deletions in private chats. The adapter should skip those events and log a warning to stderr.
+  - ⚠️ **Known limitation, Telegram**: this is exactly what happens in one-to-one chats. Telegram's `UpdateDeleteMessages` carries no peer, so Telethon reports `chat_id = None` and the adapter skips it. **Retraction therefore works in groups and channels but not in DMs.** Supporting it would mean relaxing core's "`chat.platform_id` is required for every event type" rule for `unsend` and first proving that a Telegram DM message ID is unique across dialogs — a protocol-level semantic change, not a patch. Not done.
+
+**Notes on `edit`:**
+
+- **Optional capability.** An adapter declares it in `supported_events`; core never requires it. LINE has no editing concept and does not implement it. This is the same opt-in mechanism as `get_message_boxes` (v0.3) and `get_self` (v0.4), applied to an event type instead of a method.
+- `platform_message_id` is **the edited message's own ID**, not a new one — same convention as `unsend`. Core looks the target up by `(platform, platform_message_id)` and updates that row in place.
+- `content` is the **complete** post-edit content, not a diff. Core replaces, it does not merge.
+- `timestamp` is the edit time in epoch milliseconds. Platforms that do not report one may send 0; core falls back to arrival time.
+- `sender` is not required — core ignores it for `edit`, since the target row already has one.
+- **Rapid repeated edits are expected and must all be delivered.** A streaming bot rewrites the same message many times within seconds. Core does not deduplicate `edit` events, so an adapter must not coalesce or drop them either.
+- Core's projection rules, for adapter authors reasoning about what a consumer will see: an edit whose target does not exist is logged and ignored (no ghost row is created); an edit whose target is already retracted is refused (retraction is terminal); an edit identical to the stored state is a no-op that does not advance the event stream.
+- **Text only, today.** Core drops an `edit` without `content.text`, so caption edits on media messages are not carried through.
 
 **Core's event ingest contract:**
 
 Core handles every event independently, so a malformed one costs you only that event. An adapter can rely on the following, regardless of which ingest path (live push or backfill) the event arrives on:
 
 - **Per-event isolation.** A malformed event never terminates the daemon and never aborts the remaining events in the same backfill batch.
-- **Required fields.** `platform_message_id` and `chat.platform_id` are required for every event type. A `message` additionally requires `content.type` and `sender.platform_id`. Events missing these are dropped with a warning on stderr — they are not written to storage.
+- **Required fields.** `platform_message_id` and `chat.platform_id` are required for every event type. A `message` additionally requires `content.type` and `sender.platform_id`; an `edit` additionally requires `content.type` and `content.text`. Events missing these are dropped with a warning on stderr — they are not written to storage.
 - **`chat.type` is not required** for non-`message` events. Core fills in `"unknown"` internally to satisfy its storage type; that value is never written to the chats table and carries no meaning.
 - **Unknown `type` values are preserved, not dropped.** Core writes them to the JSONL event log and logs a warning. A future protocol version can add event types without older cores discarding them.
-- **Only `message` events notify subscribers.** `unsend` and `read_receipt` change no state that consumers read, so they are logged and stored but trigger no push.
+- **Every event that changes stored state notifies subscribers.** `message`, `edit` and `unsend` all push. `read_receipt` does not — it is the only event type that changes nothing a consumer reads. (Before v0.5 only `message` pushed, because `edit` did not exist and `unsend` was stored without being applied.)
+- **Change events are applied to the existing row, not appended as new ones.** `edit` replaces the target's content; `unsend` clears it and marks the row retracted. The JSONL event log stays append-only either way — the original text remains recoverable there, and replaying the log rebuilds the same SQLite state.
 
 ### `status`
 
@@ -563,6 +583,20 @@ A valid adapter is a standalone program in any language that only needs to:
 ---
 
 ## Changelog
+
+### v0.5 — a delivered message can still change
+
+Additive and non-breaking; a v0.4 adapter runs unchanged. LINE required zero changes and
+was verified to keep delivering messages throughout.
+
+| Change | Rationale |
+|--------|-----------|
+| Added optional event type `edit` | Editing a delivered message was invisible to consumers, which is not a cosmetic gap: **any bot that streams its output by rewriting one message — the standard shape of an LLM bot — was permanently stuck at its first frame.** `edit` is opt-in via `supported_events`, so platforms without the concept (LINE) implement nothing |
+| `unsend` is now applied, not merely stored | v0.4 stored retraction events and did nothing with them, so a retracted message stayed fully readable and searchable. Core now clears the content, stamps `retracted_at`, and drops the text from the search index |
+| Rewrote "Only `message` events notify subscribers" | It was true only because change events were inert. With `edit` and `unsend` applied to stored state, withholding the push would leave consumers displaying content the platform no longer has |
+| Documented that `edit`/`unsend` reuse the target's `platform_message_id` | Both address an existing row rather than creating one. Stated explicitly because it is what lets core find the target at all, and because it means a dedup key of `(platform, platform_message_id)` alone would swallow every change event |
+| Documented that adapters must not coalesce rapid `edit`s | The originating use case emits many edits per second against one message; any collapsing along the path shows the user a stale intermediate frame |
+| Documented the Telegram DM retraction limitation under §unsend | `UpdateDeleteMessages` carries no peer, so DM deletions never reach core. Recorded as a known gap rather than left to be rediscovered |
 
 ### v0.4 — core can tell who it is
 

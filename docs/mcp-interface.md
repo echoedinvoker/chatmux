@@ -129,7 +129,9 @@ Reads messages from one chat, paginated by timestamp (`before` / `after`).
       "content": {
         "type": "text",
         "text": "你好！"
-      }
+      },
+      "edited_at": null,
+      "retracted_at": null
     }
   ],
   "has_more": true,
@@ -137,6 +139,18 @@ Reads messages from one chat, paginated by timestamp (`before` / `after`).
   "newest_timestamp": 1690000000000
 }
 ```
+
+**`edited_at` / `retracted_at`** (since v0.5) tell a consumer that a message it may
+already be displaying has changed:
+
+| Field | Meaning |
+|-------|---------|
+| both null | Never modified since it arrived |
+| `edited_at` non-null | `content.text` is the current text, replaced at that time |
+| `retracted_at` non-null | Retracted. `content.text` is `null` and the original is gone from storage; render a placeholder |
+
+They are not mutually exclusive — a message can be edited and later retracted.
+`retracted_at` wins when both are set.
 
 ### `read_events`
 
@@ -171,15 +185,50 @@ order in which core accepted writes**, so they arrive normally.
         "chat_id": "line:c1234567890abcdef",
         "sender": { "id": "line:u1234567890abcdef", "display_name": "Alice" },
         "timestamp": 1690000000000,
-        "content": { "type": "text", "text": "你好！" }
+        "content": { "type": "text", "text": "你好！" },
+        "edited_at": null,
+        "retracted_at": null
+      }
+    },
+    {
+      "cursor": "evt:1644",
+      "type": "edit",
+      "message": {
+        "id": "telegram:4484",
+        "chat_id": "telegram:-1001234567890",
+        "sender": { "id": "telegram:123456789", "display_name": "MattClaudeBot" },
+        "timestamp": 1690000000000,
+        "content": { "type": "text", "text": "the final answer" },
+        "edited_at": 1690000050000,
+        "retracted_at": null
+      }
+    },
+    {
+      "cursor": "evt:1645",
+      "type": "unsend",
+      "message": {
+        "id": "telegram:4485",
+        "chat_id": "telegram:-1001234567890",
+        "sender": { "id": "telegram:123456789", "display_name": "MattClaudeBot" },
+        "timestamp": 1690000010000,
+        "content": { "type": "text", "text": null },
+        "edited_at": null,
+        "retracted_at": 1690000100000
       }
     }
   ],
-  "next_cursor": "evt:1643",
-  "head_cursor": "evt:1643",
+  "next_cursor": "evt:1645",
+  "head_cursor": "evt:1645",
   "has_more": false
 }
 ```
+
+`type` is **derived from the row's current state**, not from a stored history: retracted
+wins, then edited, otherwise `message`. So a full replay from cursor 0 reports a
+message that was later edited as a single `edit` event — the consumer never sees the
+version it missed. That is correct for a consumer applying final state, and a consumer
+that genuinely needs the edit history should read the JSONL log, which keeps every
+version.
 
 **The cursor contract:**
 
@@ -193,10 +242,13 @@ order in which core accepted writes**, so they arrive normally.
 | **Ordering** | Events are **ascending** in the order core accepted them, which is unrelated to `timestamp` order |
 | **Sparse** | The sequence **has gaps and is not contiguous**. Do not assume adjacency, and **do not subtract two cursors to estimate a backlog** — on a real store of 1644 messages the sequence had already reached 18744. Ask whether more is pending (`has_more`), never how much |
 | **Dedup** | A duplicate message rejected by `INSERT OR IGNORE` does not advance the cursor (NEVER #7) |
+| **Re-delivery** | A message you have already seen **can appear again** with a later cursor, when it is edited or retracted. Key on `message.id` and apply the new state; do not assume each cursor position is a message you have never seen |
 
-**Current coverage:** only `message` events reach SQLite (see `syncEventToSQLite`), so
-only those are sequenced. When other event types get persisted they join **the same**
-sequence.
+**Coverage:** `message`, `edit` and `unsend` are sequenced (see `syncEventToSQLite`).
+`read_receipt` is not — it changes nothing a consumer reads. Since v0.5 the sequence is
+the `messages.seq` column rather than the row id, precisely so that a change to an
+already-delivered message can take a new position at the tail; a consumer parked past
+that message's original position still receives it.
 
 **Using it with subscription** (see Resource Subscription below):
 
@@ -380,6 +432,14 @@ Recent messages for one chat.
 
 **Response**: same shape as the `read_messages` tool output (the latest N, default 20).
 
+⚠️ **Only `limit` is parsed — there is no `before` / `after`.** A read of this resource
+therefore always returns the newest N messages. This matters for change events: a
+subscriber re-reading after a push sees an edit or retraction only if the affected
+message is still inside that window. A consumer whose buffer has grown past N will miss
+the update for anything older, with no signal that it did. Re-opening the chat or paging
+with `read_messages` returns the correct `edited_at` / `retracted_at` and repairs the
+state.
+
 ### `chat://chats/{id}/info`
 
 Details for one chat.
@@ -418,8 +478,12 @@ System status summary.
 MCP resource subscription follows a **notify-then-fetch** model:
 
 1. The client (Claude Code, say) subscribes to a resource URI.
-2. When a new message is written to Storage, the core MCP server sends a `notifications/resources/updated` notification.
+2. When Storage changes — a new message, or an edit or retraction applied to an existing one — the core MCP server sends a `notifications/resources/updated` notification.
 3. On receiving it, the client fetches the resource itself to get the latest data.
+
+⚠️ A notification means "this resource changed", never "there is one more message".
+A client that appends whatever it fetches, skipping IDs it already holds, will drop
+every edit and retraction on the floor. Upsert by `message.id` instead.
 
 ### Trigger flow
 
@@ -428,6 +492,7 @@ Adapter event notification → Core writes to Storage
   → determine the affected resources:
     - new message  → chat://chats (last_message changed)
                      + chat://chats/{affected_chat_id}/messages
+    - edit/unsend  → chat://chats/{affected_chat_id}/messages
     - new contact  → chat://chats/{affected_chat_id}/info
     - state change → chat://status
   → send notifications/resources/updated for each affected resource

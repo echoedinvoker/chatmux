@@ -19,6 +19,8 @@ AI clients (Claude Code). Not a chat app — no UI, pure data layer.
 - `src/core/storage/sqlite.ts` — SQLite schema + JSONL→SQLite sync (query view)
 - `src/core/storage/fts.ts` — FTS5 trigram setup + sync triggers
 - `src/core/storage/query.ts` — High-level queries: search, paginated read, event cursor, stats
+- `src/core/storage/replay.ts` — `replayJsonl`: rebuild SQLite by replaying JSONL through the projection
+- `src/core/ingest.ts` — Ingest boundary: shape validation + per-event isolation (no storage semantics)
 - `src/core/mcp/server.ts` — MCP Streamable HTTP on loopback TCP + unix socket (shared handler)
 - `src/core/mcp/tools.ts` — 6 MCP tools (list_chats, read_messages, read_events, search_messages, send_message, get_status)
 - `src/core/mcp/resources.ts` — 4 MCP resources + subscription
@@ -55,7 +57,12 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 
 ### Storage: Dual-Write
 
-Receive event → append JSONL → INSERT OR IGNORE SQLite. JSONL is truth, SQLite is queryable view.
+Receive event → append JSONL → project into SQLite. JSONL is truth, SQLite is queryable view.
+
+`syncEventToSQLite` branches on event type: `message` → INSERT OR IGNORE; `edit` / `unsend`
+→ UPDATE the existing row and move its `seq` to the tail; anything else → no-op. Applying
+changes **in the projection, not above it**, is what keeps `replayJsonl` (rebuild from
+JSONL) agreeing with the live database.
 
 ### ID Scheme
 

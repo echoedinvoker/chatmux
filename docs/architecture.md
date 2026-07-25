@@ -83,13 +83,23 @@ LINE pushes a message
       → malformed → warn and drop; the daemon and the rest of the batch are unaffected
   → Storage: landEvent (the single landing entry point, see below)
       → append to JSONL (truth source)
-      → INSERT OR IGNORE into SQLite (query view, deduped by UNIQUE constraint)
+      → project into SQLite (query view):
+          message      → INSERT OR IGNORE, deduped by UNIQUE constraint
+          edit/unsend  → UPDATE the existing row and move it to the tail of the sequence
       → FTS5 trigger: full-text index updated in step
   → MCP Server: notifications/resources/updated → consumer fetches the latest data
 ```
 
+**The projection is where change events are applied**, not the ingest boundary above it.
+Rebuilding SQLite means replaying the JSONL through that same projection
+(`replayJsonl`), so logic living above it would be absent from a rebuild and the two
+would diverge. The ingest boundary validates shape and isolates failures; it holds no
+storage semantics.
+
 A consumer that needs to resume where it left off uses `read_events` with a cursor
-rather than re-fetching resources; see `mcp-interface.md`.
+rather than re-fetching resources; see `mcp-interface.md`. Note that an already-delivered
+message reappears at a new cursor position when it is edited or retracted — cursors track
+changes, not just arrivals.
 
 ### Send path (Consumer → Adapter)
 
@@ -112,16 +122,21 @@ happens to echo it back — LINE does, Telegram does not.
 ### The single landing entry point
 
 Both paths above funnel through `landEvent` (`src/core/storage/land-event.ts`), never
-appending on their own. It keeps an in-memory map of recently landed
+appending on their own. For `message` events it keeps an in-memory map of recently landed
 `type:platform:platform_message_id` keys (60 s TTL) and lands whichever path arrives first,
 dropping the other with a `deduped echo` log line.
 
-The key includes `type` because an `unsend` reuses the ID of the message it retracts —
-Telegram's deletion events carry no ID of their own. Without `type` in the key, deleting a
-message within the 60 s window would land on the original message's key and vanish silently.
+**Only `message` events are deduplicated.** The map exists for exactly one race — core
+landing a message it just sent versus the platform echoing that same message back — and
+change events have no second source. Applying the map to them is actively harmful:
+`edit` and `unsend` both reuse the ID of the message they act on (Telegram's deletion and
+edit updates carry no ID of their own), so a bot rewriting one message ten times inside
+the TTL would have nine of those edits dropped with nothing written and nothing logged.
+The cost of not deduplicating is one extra JSONL line if a platform ever repeats an
+`unsend`, and since applying it is idempotent the SQLite state is identical.
 
-Only `message` events notify subscribers. `unsend` and `read_receipt` change nothing a
-consumer reads, so pushing on them would only trigger a wasted re-read.
+`message`, `edit` and `unsend` all notify subscribers — each one changes what a consumer
+reads. `read_receipt` does not, so pushing on it would only trigger a wasted re-read.
 
 The deduplication exists for JSONL, not SQLite. SQLite absorbs duplicates through
 `INSERT OR IGNORE`; the append-only log has no such defence, and a duplicated line in the
@@ -168,7 +183,7 @@ Daemon starts
 |-----------|------|--------------|
 | **Adapter** | Platform connection (auth/push/reconnect), E2EE decryption, event format conversion, reporting platform rate limits | Storage, search, rate-limit decisions, serving MCP |
 | **Adapter Runner** | Spawning/watching/restarting adapters, stdio JSON-RPC routing, process-crash ErrorTracker (kill at 5) | Platform-specific logic, storage |
-| **Storage** | JSONL writes, SQLite sync, FTS5 indexing, dedup (SQLite `UNIQUE` + the in-memory landing keys in `land-event.ts`), query API | Communication protocols, rate limiting |
+| **Storage** | JSONL writes, projecting events into SQLite (including applying edits and retractions), FTS5 indexing, dedup (SQLite `UNIQUE` + the in-memory landing keys in `land-event.ts`), replay/rebuild, query API | Communication protocols, rate limiting |
 | **SafetyRail** | Send rate limiting, send-failure ErrorTracker (kill at 3), KillSwitch | Storage, adapter lifecycle |
 | **MCP Server** | Tool dispatch, resource serving, subscription notifications | Platform connections, direct SQLite access (goes through the Storage query API) |
 

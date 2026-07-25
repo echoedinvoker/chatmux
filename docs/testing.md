@@ -37,7 +37,14 @@ tests/
 │   ├── multi-adapter.test.ts    # AdapterManager routing across platforms
 │   ├── optional-method.test.ts  # Optional protocol methods via error.code
 │   ├── storage.test.ts          # JSONL + SQLite + FTS5 + query
+│   ├── apply-changes.test.ts    # edit/unsend projected onto existing rows
+│   ├── replay.test.ts           # replayJsonl rebuilds the same state
+│   ├── fts-retraction.test.ts   # retracted text leaves the FTS index
+│   ├── land-event.test.ts       # single landing entry point, dedup scope, notify scope
+│   ├── ingest.test.ts           # shape validation + per-event isolation boundary
 │   ├── event-cursor.test.ts     # read_events cursor semantics
+│   ├── read-events-changes.test.ts # change events re-enter the sequence at the tail
+│   ├── daemon-live.test.ts      # live vs backfill ingest wiring
 │   ├── mcp-server.test.ts       # Transport: TCP + unix socket listeners
 │   └── mcp-tools.test.ts        # MCP tools + resources
 ├── adapters/
@@ -114,7 +121,7 @@ the adapter.
 | `contacts.test.ts` | `ContactClient` | `getContacts()` returns a fake contact list |
 | `adapter-runner.test.ts` | Child process | Fake stdin/stdout streams simulating JSON-RPC request/response |
 | `mcp-tools.test.ts` | Storage + Adapter Runner | Pre-seeded SQLite fixtures, mocked `send_message` on the adapter runner |
-| `notifier.test.ts` | Event source | A fake `callTool` serving canned `read_events` pages |
+| `notifier.test.ts` | Event source | A fake `callTool` serving canned `read_events` pages. The canned pages are the reference consumer's contract, so they must keep matching the tool's real output — the `type` field and the `edited_at` / `retracted_at` message fields included |
 | `storage.test.ts` | Nothing | Uses real `bun:sqlite` (`:memory:`) |
 
 ## bun:test conventions
