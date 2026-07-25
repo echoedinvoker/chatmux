@@ -1,7 +1,7 @@
 # Adapter Protocol
 
-> **Protocol Version**: 0.2
-> **Validated against**: LINE (v0.1), Telegram (v0.2)
+> **Protocol Version**: 0.3
+> **Validated against**: LINE (v0.1), Telegram (v0.2, v0.3)
 > **Changelog**: see bottom of document
 
 chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JSON-RPC 與 core daemon 通訊。Adapter 可以用任何語言實作，可以在 chatmux monorepo 內或獨立 repo。
@@ -165,6 +165,7 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
       "platform_id": "c1234567890abcdef",
       "type": "group",
       "name": "工作群組",
+      "last_message_at": 1690000000000,
       "raw": { ... }
     },
     {
@@ -180,9 +181,20 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 
 `raw` 是選填。DM 的 `name` 取自 contacts map 或 adapter 自行解析。未知 DM 的 name 為 null。
 
+**`last_message_at`（optional，v0.3 起）**：該對話最後一則訊息的時間（ms epoch）。
+
+這是 core 冷啟動 backfill 的**排序訊號**——core 按 `last_message_at DESC` 排序後，在全域預算（500 則）內從最活躍的對話開始回填。強烈建議提供：
+
+- **有提供** → 冷啟動預算花在最近有動靜的對話上
+- **未提供**（全部 null）→ 排序退化成任意順序，預算可能全花在冷對話上。功能不會壞，但冷啟動品質顯著下降
+
+多數平台的 dialogs/conversations API 已直接帶這個欄位（Telegram `dialog.date`），成本近乎零。core 對已有值採 `MAX()` 保護，回 null 不會覆寫既有值。
+
 ### `get_message_boxes`（optional）
 
-> **v0.2 起為 optional**。若 adapter 不支援，回 JSON-RPC error `-32601` (Method not found)，core 跳過此步驟，直接用 `get_chats` 結果做 backfill 排序。
+> **v0.2 起為 optional**。若 adapter 不支援，回 JSON-RPC error `-32601` (Method not found)。core **只看 `error.code`**（不比對 message 文字，措辭隨你），跳過此步驟，改用 `get_chats` 回傳的 `last_message_at` 做 backfill 排序。
+>
+> ⚠️ **不實作此方法的 adapter 應在 `get_chats` 提供 `last_message_at`**——否則 core 沒有任何排序訊號，冷啟動 backfill 預算會花在隨機對話上（v0.2 曾承諾此 fallback 但沒有欄位可用，v0.3 補上）。
 
 取得所有有訊息的對話清單，用於冷啟動 backfill 發現。此方法源自 LINE 的 messageBoxes API，其他平台的 dialogs/conversations API 通常已由 `get_chats` 涵蓋。
 
@@ -441,6 +453,17 @@ Adapter 應在 README 中記載其 auth 流程。若採用「獨立登入流程�
 ---
 
 ## Changelog
+
+### v0.3（optional 方法真閉環）
+
+Additive、非 breaking——v0.2 adapter 不改也能跑。
+
+| 改動 | Gap ID | 說明 |
+|------|--------|------|
+| §get_chats 新增 optional `last_message_at` | G1 | v0.2 承諾「用 get_chats 做 backfill 排序」但 response schema 沒有任何時間欄位，fallback 照著做不出來。補上排序訊號，讓 `get_message_boxes` optional 真的成立 |
+| §get_message_boxes 明示偵測靠 `error.code` | G1 | core 改讀 JSON-RPC `error.code`，不再比對 message 文字。第三方 adapter 換措辭不會被當硬失敗 |
+| Telegram 移除 `get_message_boxes` | G1, G-new-11 | 原本是 `get_dialogs()` 的第二份包裝（與自己的 `get_chats` 同源）。刪掉讓 optional fallback 路徑真的被壓測過 |
+| 移除 `contactName ? "direct" : "group"` 推斷 | G-new-8 | `type` 由 `get_chats` 權威提供，不再靠 contact cache 猜。`chats.type` 是 `NOT NULL CHECK`、沒有誠實的值可填，所以未被 `get_chats` 回報的 message box 一律跳過並 WARN，不發明 type。contacts 稀疏或抓取失敗的平台（Telegram 的 contacts 表實測為空）不會把私聊誤歸為 group |
 
 ### v0.2（Telegram adapter 驗證後泛化）
 

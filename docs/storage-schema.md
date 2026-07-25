@@ -87,6 +87,10 @@ CREATE TABLE chats (
 );
 ```
 
+**`type` 的唯一權威是 adapter 的 `get_chats`**。欄位是 `NOT NULL CHECK`，沒有 "unknown" 可填——所以 core **不從其他訊號推斷 type**。曾經有一版用「contacts 表查得到顯示名就算 direct」來猜，那在 LINE（1799 contacts）成立、在 contacts 稀疏或抓取失敗的平台會把每個私聊判成 group。現在 `get_chats` 沒回報的對話一律跳過並 WARN，不發明資料。
+
+**`last_message_at` 的 NULL 語義**：NULL = 「adapter 沒給排序訊號」，不是「很久以前」。寫入時用 `MAX(COALESCE(...))` 保護既有值，但**外層必須包 `NULLIF(..., 0)`**——否則兩邊皆 NULL 時會寫進 epoch `0`，讓「完全沒有排序訊號」偽裝成一個真實時間戳，使 backfill 排序退化**檢查不出來**。`ORDER BY last_message_at DESC NULLS LAST` 依賴這個區分。
+
 ### messages
 
 ```sql

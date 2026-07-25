@@ -100,30 +100,43 @@ export async function handleGetChats(
   const groups = await fetchChats(client);
   const groupMids = new Set(groups.map((g) => g.chatMid));
 
-  const result: { platform_id: string; type: "group" | "direct"; name: string | null; raw?: unknown }[] =
-    groups.map((c) => ({
-      platform_id: c.chatMid,
-      type: "group" as const,
-      name: c.chatName,
-      raw: c,
-    }));
+  const boxes = client.getMessageBoxes ? await client.getMessageBoxes() : [];
+  // protocol v0.3: get_chats carries the backfill ordering signal itself, so
+  // core does not have to call get_message_boxes to learn recency.
+  const lastMessageAt = new Map<string, number>();
+  for (const box of boxes) {
+    if (box.lastDeliveredTime) lastMessageAt.set(box.id, box.lastDeliveredTime);
+  }
 
-  if (client.getMessageBoxes) {
-    const boxes = await client.getMessageBoxes();
-    for (const box of boxes) {
-      if (box.id.startsWith("u")) {
-        result.push({
-          platform_id: box.id,
-          type: "direct",
-          name: contactsMap?.get(box.id) ?? null,
-        });
-      } else if (!groupMids.has(box.id)) {
-        result.push({
-          platform_id: box.id,
-          type: "group",
-          name: null,
-        });
-      }
+  const result: {
+    platform_id: string;
+    type: "group" | "direct";
+    name: string | null;
+    last_message_at: number | null;
+    raw?: unknown;
+  }[] = groups.map((c) => ({
+    platform_id: c.chatMid,
+    type: "group" as const,
+    name: c.chatName,
+    last_message_at: lastMessageAt.get(c.chatMid) ?? null,
+    raw: c,
+  }));
+
+  for (const box of boxes) {
+    if (box.id.startsWith("u")) {
+      result.push({
+        platform_id: box.id,
+        type: "direct",
+        name: contactsMap?.get(box.id) ?? null,
+        last_message_at: lastMessageAt.get(box.id) ?? null,
+      });
+    } else if (!groupMids.has(box.id)) {
+      result.push({
+        platform_id: box.id,
+        type: "group",
+        name: null,
+        last_message_at: lastMessageAt.get(box.id) ?? null,
+      });
     }
   }
 

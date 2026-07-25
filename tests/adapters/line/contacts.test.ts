@@ -148,6 +148,48 @@ describe("handleGetChats", () => {
     expect(result.chats[0].type).toBe("group");
     expect(result.chats[0].name).toBe("工作群組");
   });
+
+  it("carries last_message_at from message boxes (protocol v0.3)", async () => {
+    const client = createMockClient({
+      async getAllChatMids() {
+        return { memberChatMids: ["c_001"], invitedChatMids: [] };
+      },
+      async getChats() {
+        return [{ chatMid: "c_001", chatName: "工作群組" }];
+      },
+      async getMessageBoxes() {
+        return [
+          { id: "c_001", lastDeliveredTime: 1700000000000 },
+          { id: "u_001", lastDeliveredTime: 1700000005000 },
+        ];
+      },
+    });
+
+    const result = await handleGetChats(client);
+
+    const group = result.chats.find((c) => c.platform_id === "c_001");
+    const dm = result.chats.find((c) => c.platform_id === "u_001");
+    expect(group?.last_message_at).toBe(1700000000000);
+    expect(dm?.last_message_at).toBe(1700000005000);
+  });
+
+  it("leaves last_message_at null when no message box covers the chat", async () => {
+    const client = createMockClient({
+      async getAllChatMids() {
+        return { memberChatMids: ["c_002"], invitedChatMids: [] };
+      },
+      async getChats() {
+        return [{ chatMid: "c_002", chatName: "冷群組" }];
+      },
+      async getMessageBoxes() {
+        return [];
+      },
+    });
+
+    const result = await handleGetChats(client);
+
+    expect(result.chats[0].last_message_at).toBeNull();
+  });
 });
 
 describe("enrichSenderName", () => {

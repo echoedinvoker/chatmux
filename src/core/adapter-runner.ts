@@ -22,6 +22,9 @@ export interface JsonRpcNotification {
   params: unknown;
 }
 
+/** JSON-RPC 2.0 reserved error code for an unimplemented method. */
+export const METHOD_NOT_FOUND = -32601;
+
 export class AdapterProtocolError extends Error {
   constructor(
     public code: number,
@@ -30,6 +33,16 @@ export class AdapterProtocolError extends Error {
     super(message);
     this.name = "AdapterProtocolError";
   }
+}
+
+/**
+ * True when the adapter declined a request because it does not implement the
+ * method (JSON-RPC "Method not found"). Optional protocol methods are detected
+ * with this — never by matching the error message text, which every adapter is
+ * free to word differently.
+ */
+export function isMethodNotFound(err: unknown): boolean {
+  return err instanceof AdapterProtocolError && err.code === METHOD_NOT_FOUND;
 }
 
 export class AdapterProtocol {

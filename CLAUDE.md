@@ -49,7 +49,7 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 
 | Direction | Type | Examples |
 |-----------|------|----------|
-| Core → Adapter | Request (expects response) | initialize, get_contacts, get_chats, get_message_boxes, send_message, backfill, shutdown |
+| Core → Adapter | Request (expects response) | initialize, get_contacts, get_chats, send_message, backfill, shutdown, _get_message_boxes (optional)_ |
 | Adapter → Core | Notification (fire-and-forget) | event, status, error |
 
 ### Storage: Dual-Write

@@ -114,8 +114,10 @@ Daemon 啟動
   → Core 等待各 adapter status "connected" 通知（120s timeout）
   → 對每個 connected adapter:
     → get_contacts → contacts 寫入 Storage
-    → get_chats → chats 寫入 Storage
-    → get_message_boxes (optional, skip on -32601) → 補充 chats 的 lastDeliveredTime
+    → get_chats → chats 寫入 Storage（含 optional last_message_at，v0.3 的 backfill 排序訊號）
+    → get_message_boxes (optional, skip on error.code === -32601)
+        → 只為「已在 chats 表的對話」補 last_message_at
+        → 未出現在 get_chats 的 box 一律跳過並 WARN（不猜 type，get_chats 是唯一權威）
     → backfill: 按 last_message_time 降序逐 chat 取 50 筆/輪
       → 全域計數器達 500 即停（不等遍歷完所有 chat）
       → 若首輪未達 500 且仍有 chat 未見底則再輪
