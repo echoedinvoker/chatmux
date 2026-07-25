@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { listChats, getMessages, searchMessages, getStatus, getEventsSince, getHeadSeq, resolveChatInternalId, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
 import type { SafetyRail } from "../safety.js";
 import type { JsonlEvent } from "../storage/jsonl.js";
+import { isInFlight } from "../backfill-on-demand.js";
 
 interface ChatOutput {
   id: string;
@@ -84,11 +85,37 @@ interface MessageOutput {
   retracted_at: number | null;
 }
 
+export type HistoryState = "complete" | "partial" | "backfilling" | "unavailable" | "unknown";
+
 interface ReadMessagesResult {
   messages: MessageOutput[];
   has_more: boolean;
   oldest_timestamp: number | null;
   newest_timestamp: number | null;
+  history: { state: HistoryState; reason?: string };
+}
+
+const HISTORY_STATE_BY_BACKFILL_STATE: Record<string, HistoryState> = {
+  exhausted: "complete",
+  partial: "partial",
+  unavailable: "unavailable",
+  unknown: "unknown",
+};
+
+function readHistory(db: Database, chatId: string, internalId: number | null): ReadMessagesResult["history"] {
+  if (isInFlight(chatId)) return { state: "backfilling" };
+  if (internalId == null) return { state: "unknown" };
+
+  const row = db
+    .query<{ backfill_state: string | null }, [number]>(
+      "SELECT backfill_state FROM chats WHERE id = ?"
+    )
+    .get(internalId);
+
+  const state = HISTORY_STATE_BY_BACKFILL_STATE[row?.backfill_state ?? "unknown"] ?? "unknown";
+  return state === "unavailable"
+    ? { state, reason: "platform_no_history" }
+    : { state };
 }
 
 function formatMessage(row: MessageRow, db: Database): MessageOutput {
@@ -130,7 +157,13 @@ export function handleReadMessages(
   const limit = params.limit ?? 20;
   const internalId = resolveChatInternalId(db, params.chat_id);
   if (internalId == null) {
-    return { messages: [], has_more: false, oldest_timestamp: null, newest_timestamp: null };
+    return {
+      messages: [],
+      has_more: false,
+      oldest_timestamp: null,
+      newest_timestamp: null,
+      history: readHistory(db, params.chat_id, null),
+    };
   }
 
   const rows = getMessages(db, internalId, {
@@ -151,7 +184,13 @@ export function handleReadMessages(
     newest = Math.max(...timestamps);
   }
 
-  return { messages, has_more: hasMore, oldest_timestamp: oldest, newest_timestamp: newest };
+  return {
+    messages,
+    has_more: hasMore,
+    oldest_timestamp: oldest,
+    newest_timestamp: newest,
+    history: readHistory(db, params.chat_id, internalId),
+  };
 }
 
 /**

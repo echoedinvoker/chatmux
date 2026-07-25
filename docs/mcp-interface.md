@@ -136,9 +136,27 @@ Reads messages from one chat, paginated by timestamp (`before` / `after`).
   ],
   "has_more": true,
   "oldest_timestamp": 1689900000000,
-  "newest_timestamp": 1690000000000
+  "newest_timestamp": 1690000000000,
+  "history": {
+    "state": "partial"
+  }
 }
 ```
+
+**`history`** answers a question `messages` alone cannot: is this chat short, or is
+its history missing? Without it a consumer showing three messages cannot tell whether
+the conversation was three lines long or whether the backfill never reached further.
+
+| `state` | Meaning |
+|---------|---------|
+| `complete` | Backfill reached the bottom. What you see is the whole chat |
+| `partial` | Older messages exist upstream and have not been fetched yet |
+| `backfilling` | A fetch is running right now. Expect a resource update shortly |
+| `unavailable` | The platform was asked with a real anchor and returned nothing. `reason` explains why (e.g. `platform_no_history` — LINE does not serve messages from before this device registered) |
+| `unknown` | Never attempted, so nothing can be claimed either way |
+
+`backfilling` is in-memory only and overrides the stored state — a daemon that dies
+mid-fetch comes back reporting what it actually knows, never a stale "in progress".
 
 **`edited_at` / `retracted_at`** (since v0.5) tell a consumer that a message it may
 already be displaying has changed:
@@ -430,7 +448,12 @@ Recent messages for one chat.
 
 **URI**: `chat://chats/line:c1234567890abcdef/messages?limit=20`
 
-**Response**: same shape as the `read_messages` tool output (the latest N, default 20).
+**Response**: same shape as the `read_messages` tool output (the latest N, default 20),
+`history` included — both paths share one implementation, so `complete` / `partial` /
+`backfilling` / `unavailable` / `unknown` mean exactly what they mean for the tool.
+
+Reading this resource also triggers an on-demand backfill when the chat qualifies, which
+is why a first read can answer `unknown` and an immediate second read `backfilling`.
 
 ⚠️ **Only `limit` is parsed — there is no `before` / `after`.** A read of this resource
 therefore always returns the newest N messages. This matters for change events: a

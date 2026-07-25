@@ -7,6 +7,7 @@ import { handleListChats, handleReadMessages, handleSearchMessages, handleSendMe
 import type { OutgoingDraft } from "../../src/core/mcp/tools";
 import { handleResource, ResourceSubscriptionManager } from "../../src/core/mcp/resources";
 import { SafetyRail } from "../../src/core/safety";
+import { markInFlight, clearInFlight, __resetBackfillState } from "../../src/core/backfill-on-demand";
 
 function makeEvent(overrides: Partial<JsonlEvent> & { platform_message_id: string }): JsonlEvent {
   return {
@@ -197,6 +198,80 @@ describe("read_messages tool", () => {
   test("returns empty for non-existent chat", () => {
     const result = handleReadMessages(db, { chat_id: "line:c_nonexistent" });
     expect(result.messages).toHaveLength(0);
+  });
+});
+
+describe("read_messages history state", () => {
+  let db: Database;
+
+  function setState(state: string | null) {
+    db.query("UPDATE chats SET backfill_state = ? WHERE platform_id = 'c_alice'").run(state);
+  }
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+    __resetBackfillState();
+
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "m0",
+      chat: { platform_id: "c_alice", type: "direct", name: "Alice" },
+      sender: { platform_id: "u_alice", display_name: "Alice" },
+      timestamp: 1690000000000,
+      content: { type: "text", text: "hi" },
+    }));
+  });
+
+  afterEach(() => {
+    __resetBackfillState();
+    db.close();
+  });
+
+  test("unavailable maps to unavailable", () => {
+    setState("unavailable");
+    expect(handleReadMessages(db, { chat_id: "line:c_alice" }).history?.state).toBe("unavailable");
+  });
+
+  test("exhausted maps to complete", () => {
+    setState("exhausted");
+    expect(handleReadMessages(db, { chat_id: "line:c_alice" }).history?.state).toBe("complete");
+  });
+
+  test("partial maps to partial", () => {
+    setState("partial");
+    expect(handleReadMessages(db, { chat_id: "line:c_alice" }).history?.state).toBe("partial");
+  });
+
+  test("NULL maps to unknown", () => {
+    setState(null);
+    expect(handleReadMessages(db, { chat_id: "line:c_alice" }).history?.state).toBe("unknown");
+  });
+
+  test("in-flight overrides the DB column", () => {
+    setState("partial");
+    markInFlight("line:c_alice");
+    expect(handleReadMessages(db, { chat_id: "line:c_alice" }).history?.state).toBe("backfilling");
+    clearInFlight("line:c_alice");
+    expect(handleReadMessages(db, { chat_id: "line:c_alice" }).history?.state).toBe("partial");
+  });
+
+  test("existing fields are unchanged", () => {
+    setState("unavailable");
+    const result = handleReadMessages(db, { chat_id: "line:c_alice" });
+    expect(result.messages).toHaveLength(1);
+    expect(result.has_more).toBe(false);
+    expect(result.oldest_timestamp).toBe(1690000000000);
+    expect(result.newest_timestamp).toBe(1690000000000);
+  });
+
+  test("non-existent chat still returns the empty shape", () => {
+    const result = handleReadMessages(db, { chat_id: "line:c_nope" });
+    expect(result.messages).toHaveLength(0);
+    expect(result.has_more).toBe(false);
+    expect(result.oldest_timestamp).toBeNull();
+    expect(result.newest_timestamp).toBeNull();
+    expect(result.history?.state).toBe("unknown");
   });
 });
 
