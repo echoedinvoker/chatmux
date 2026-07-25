@@ -75,6 +75,32 @@ describe("landEvent", () => {
     expect(appended.length).toBe(1);
   });
 
+  test("only notifies subscribers for message events", () => {
+    const { appended, notified, deps } = makeDeps();
+    const landEvent = makeLandEvent(deps);
+
+    expect(landEvent(makeEvent({ type: "unsend", platform_message_id: "u1" }))).toBe(true);
+    expect(notified).toEqual([]);
+
+    expect(landEvent(makeEvent({ platform_message_id: "m9" }))).toBe(true);
+    expect(notified).toEqual(["line:c1"]);
+    expect(appended.length).toBe(2);
+  });
+
+  test("an unsend is not shadowed by the message it retracts (key includes type)", () => {
+    const { appended, notified, deps } = makeDeps();
+    const landEvent = makeLandEvent(deps);
+
+    // Telegram 的 unsend 重用被收回訊息的 ID，兩者在同一個 60s TTL 窗口內
+    expect(landEvent(makeEvent({ platform: "telegram", platform_message_id: "999" }))).toBe(true);
+    expect(
+      landEvent(makeEvent({ type: "unsend", platform: "telegram", platform_message_id: "999" })),
+    ).toBe(true);
+
+    expect(appended.length).toBe(2);
+    expect(notified.length).toBe(1);
+  });
+
   test("treats different platform_message_id as distinct events", () => {
     const { appended, deps } = makeDeps();
     const landEvent = makeLandEvent(deps);
