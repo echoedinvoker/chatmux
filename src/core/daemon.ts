@@ -26,6 +26,7 @@ import {
   type SendDeps,
 } from "./mcp/tools.js";
 import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
+import { buildBackfillParams } from "./storage/query.js";
 
 const dataDir = resolve(
   process.env.CHATMUX_DATA_DIR ?? join(process.env.HOME ?? "~", ".local/share/chatmux"),
@@ -441,11 +442,11 @@ async function backfillAdapter(platform: string): Promise<void> {
     if (totalBackfilled >= GLOBAL_TARGET) break;
 
     try {
-      const result = await manager.sendRequest(platform, "backfill", {
-        chat_id: chat.platform_id,
-        before_timestamp: Date.now(),
-        count: PER_CHAT_BATCH,
-      }) as { events: JsonlEvent[]; has_more: boolean };
+      const result = await manager.sendRequest(
+        platform,
+        "backfill",
+        buildBackfillParams(db, platform, chat.platform_id, PER_CHAT_BATCH)
+      ) as { events: JsonlEvent[]; has_more: boolean };
 
       for (const event of result.events) {
         ingestBackfill(platform, event, "backfill");

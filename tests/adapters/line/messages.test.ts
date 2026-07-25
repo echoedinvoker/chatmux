@@ -390,6 +390,44 @@ describe("handleBackfill", () => {
     expect(Number(calledBefore.deliveredTime)).toBe(1690000000000);
   });
 
+  it("uses before_message_id as the real anchor messageId", async () => {
+    let calledBefore: any = null;
+    const client = createMockClient({
+      async getPreviousMessages(chatMid, count, before) {
+        calledBefore = before;
+        return [];
+      },
+    });
+
+    await handleBackfill(client, {
+      chat_id: "u_friend",
+      before_timestamp: 1690000000000,
+      before_message_id: "623300721831838042",
+      count: 50,
+    });
+
+    expect(calledBefore.messageId).toBe(BigInt("623300721831838042"));
+    expect(Number(calledBefore.deliveredTime)).toBe(1690000000000);
+  });
+
+  it("keeps messageId=0n when before_message_id is absent (v0.5 behaviour)", async () => {
+    let calledBefore: any = null;
+    const client = createMockClient({
+      async getPreviousMessages(chatMid, count, before) {
+        calledBefore = before;
+        return [];
+      },
+    });
+
+    await handleBackfill(client, {
+      chat_id: "u_friend",
+      before_timestamp: 1690000000000,
+      count: 50,
+    });
+
+    expect(calledBefore.messageId).toBe(BigInt(0));
+  });
+
   it("handles empty history", async () => {
     const client = createMockClient();
     const result = await handleBackfill(client, {

@@ -1,7 +1,7 @@
 # Adapter Protocol
 
-> **Protocol version**: 0.5
-> **Validated against**: LINE (v0.1, v0.4, v0.5), Telegram (v0.2, v0.3, v0.4, v0.5)
+> **Protocol version**: 0.6
+> **Validated against**: LINE (v0.1, v0.4, v0.5, v0.6), Telegram (v0.2, v0.3, v0.4, v0.5, v0.6)
 > **Changelog**: at the bottom of this document
 
 A chatmux adapter is a child process that talks to the core daemon over
@@ -339,11 +339,28 @@ handles pagination.
 {
   "chat_id": "c1234567890abcdef",
   "before_timestamp": 1690000000000,
+  "before_message_id": "623300721831838042",
   "count": 50
 }
 ```
 
 `chat_id` is the raw `platform_id` without a prefix, as in `send_message`.
+
+`before_message_id` is **optional** (v0.6). When present it names an existing message and
+the request means "give me the history *before this message*"; `before_timestamp` is that
+same message's timestamp. Core fills both from the oldest message it already stores for
+that chat, so repeated calls walk backwards instead of re-fetching the newest batch.
+
+**Compatibility both ways.** When `before_message_id` is absent the semantics are exactly
+v0.5 — page back from `before_timestamp` alone — so **a v0.5 adapter runs unchanged**, and
+a v0.6 adapter must still work when core omits the field (which it does for a chat with no
+stored messages yet). Never substitute a placeholder such as `"0"` or an empty string for
+an unknown anchor; omit the field.
+
+Anchoring on a message id rather than a timestamp alone is what makes paging work on some
+platforms at all: LINE's `getPreviousMessagesV2WithRequest` returns nothing for an anchor
+whose message id is `0`, and Telegram's `offset_id` does not lose messages that share a
+second the way `offset_date` can.
 
 **Response result:**
 ```json
@@ -510,7 +527,7 @@ Core spawns the adapter process
   ├─ Core sends: get_self {} (optional, skipped on -32601)
   │   └─ Adapter responds: { platform_id, display_name } or error -32601
   │
-  ├─ Core sends: backfill { chat_id, before_timestamp, count }  (repeated per chat)
+  ├─ Core sends: backfill { chat_id, before_timestamp, before_message_id?, count }  (per chat)
   │   └─ Adapter responds: { events, has_more, oldest_timestamp }
   │
   ├─ [Normal operation]
@@ -583,6 +600,16 @@ A valid adapter is a standalone program in any language that only needs to:
 ---
 
 ## Changelog
+
+### v0.6 — backfill can say "before *this* message"
+
+Additive and non-breaking; a v0.5 adapter runs unchanged.
+
+| Change | Rationale |
+|--------|-----------|
+| Added optional `before_message_id` to §backfill | Core could only say "before *now*", so every call re-fetched the newest batch and history never advanced. Measured against live accounts: with a real anchor one LINE call reached 4 days further back and one Telegram call nearly a month further back than the same call without one |
+| Documented that an unknown anchor is omitted, never faked | LINE treats `messageId: 0` as "no anchor" and falls back to its message-box list, which returns nothing for a chat the device never synced — the failure that made ~47% of LINE chats look empty. A placeholder id is therefore worse than an absent field |
+| Documented that Telegram prefers `offset_id` over `offset_date` | Two messages in the same second are indistinguishable by date, so date-only paging can skip or repeat across the boundary |
 
 ### v0.5 — a delivered message can still change
 

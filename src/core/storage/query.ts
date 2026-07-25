@@ -228,3 +228,50 @@ export function getStatus(db: Database): StatusResult {
     newest_message_at: msgStats.newest,
   };
 }
+
+export interface MessageAnchor {
+  platform_message_id: string;
+  timestamp: number;
+}
+
+export interface BackfillParams {
+  chat_id: string;
+  before_timestamp: number;
+  before_message_id?: string;
+  count: number;
+}
+
+export function getOldestMessageAnchor(
+  db: Database,
+  platform: string,
+  chatPlatformId: string
+): MessageAnchor | null {
+  return db
+    .query<MessageAnchor, [string, string]>(
+      `SELECT m.platform_message_id, m.timestamp
+       FROM messages m
+       JOIN chats c ON c.id = m.chat_id
+       WHERE c.platform = ? AND c.platform_id = ?
+       ORDER BY m.timestamp ASC, m.seq ASC
+       LIMIT 1`
+    )
+    .get(platform, chatPlatformId) ?? null;
+}
+
+export function buildBackfillParams(
+  db: Database,
+  platform: string,
+  chatPlatformId: string,
+  count: number
+): BackfillParams {
+  const anchor = getOldestMessageAnchor(db, platform, chatPlatformId);
+  if (!anchor) {
+    return { chat_id: chatPlatformId, before_timestamp: Date.now(), count };
+  }
+  return {
+    chat_id: chatPlatformId,
+    before_timestamp: anchor.timestamp,
+    before_message_id: anchor.platform_message_id,
+    count,
+  };
+}

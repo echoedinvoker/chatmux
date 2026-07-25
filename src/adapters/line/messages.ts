@@ -196,6 +196,8 @@ function toMillis(epoch: number): number {
 export interface BackfillParams {
   chat_id: string;
   before_timestamp: number;
+  /** protocol v0.6, optional：這則訊息之前的歷史。缺席時語意等同 v0.5 */
+  before_message_id?: string;
   count: number;
 }
 
@@ -211,7 +213,7 @@ export async function handleBackfill(
 ): Promise<BackfillResult> {
   const before = {
     deliveredTime: BigInt(params.before_timestamp),
-    messageId: BigInt(0),
+    messageId: params.before_message_id ? BigInt(params.before_message_id) : BigInt(0),
   };
 
   const rawMessages = await client.getPreviousMessages(
