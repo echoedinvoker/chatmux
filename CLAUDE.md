@@ -17,7 +17,7 @@ AI clients (Claude Code). Not a chat app — no UI, pure data layer.
 - `src/core/safety.ts` — SafetyRail: RateLimiter → ErrorTracker → KillSwitch
 - `src/core/storage/jsonl.ts` — JSONL append-only event writer (truth source)
 - `src/core/storage/sqlite.ts` — SQLite schema + JSONL→SQLite sync (query view)
-- `src/core/storage/fts.ts` — FTS5 bigram+trigram setup + sync triggers
+- `src/core/storage/fts.ts` — FTS5 trigram setup + sync triggers
 - `src/core/storage/query.ts` — High-level queries: search, paginated read, event cursor, stats
 - `src/core/mcp/server.ts` — MCP Streamable HTTP on loopback TCP + unix socket (shared handler)
 - `src/core/mcp/tools.ts` — 6 MCP tools (list_chats, read_messages, read_events, search_messages, send_message, get_status)
@@ -113,7 +113,7 @@ tests — what deserves interrupting you has no single right answer — so it li
 
 - `docs/architecture.md` — Three-layer topology, process model, data flow
 - `docs/adapter-protocol.md` — stdio JSON-RPC contract, adapter lifecycle
-- `docs/storage-schema.md` — JSONL + SQLite schema, FTS5 dual tokenizer
+- `docs/storage-schema.md` — JSONL + SQLite schema, FTS5 trigram + LIKE fallback, event cursor
 - `docs/mcp-interface.md` — 6 tools + 4 resources + subscription
 - `docs/safety-rail.md` — Dual-layer SafetyRail architecture
 - `docs/line-adapter.md` — LINE-specific: linejs, LEGY Push, E2EE

@@ -1,103 +1,114 @@
 # LINE Adapter
 
-LINE adapter 是 chatmux v0.1 唯一的 adapter，連接 LINE IOSIPAD slot 接收推送訊息。
+The LINE adapter is chatmux v0.1's only adapter. It connects through LINE's IOSIPAD
+device slot to receive pushed messages.
 
-## linejs（`@evex/linejs`）
+## linejs (`@evex/linejs`)
 
-非官方 LINE client library，提供：
-- QR 碼登入 + authToken 登入
-- LEGY Push（HTTP/2 長連線接收推送）
-- E2EE 訊息加解密
-- 訊息發送（`sendCompactMessage`）
-- 歷史訊息拉取（`getPreviousMessages`）
-- 聯絡人/群組/聊天室查詢
+An unofficial LINE client library. It provides:
 
-**安裝**：透過 JSR registry — `npm:@jsr/evex__linejs`，需 `.npmrc` 設定 `@jsr:registry=https://npm.jsr.io`。
+- QR code login and authToken login
+- LEGY Push (a long-lived HTTP/2 connection for receiving pushes)
+- E2EE message encryption and decryption
+- Message sending (`sendCompactMessage`)
+- History fetching (`getPreviousMessages`)
+- Contact, group, and chat room lookups
 
-**帳號風險**：linejs 使用非官方 API，LINE 可能限制或封鎖帳號。README 必須揭露此風險。
+**Installation**: via the JSR registry as `npm:@jsr/evex__linejs`, which needs
+`@jsr:registry=https://npm.jsr.io` in `.npmrc`.
 
-## IOSIPAD Device Slot
+**Account risk**: linejs uses unofficial APIs, and LINE may restrict or ban the account.
+The README must disclose this.
 
-LINE 允許多裝置同時登入，iPad 是其中一個 device slot。chatmux 佔用 IOSIPAD slot：
+## The IOSIPAD device slot
 
-- **不影響手機 LINE**：手機用的是 PRIMARY slot
-- **不能同時跑兩個 IOSIPAD client**：chatmux 和 line-tui 共用同一 slot，不能同時運行
-- **登入參數**：`{ device: "IOSIPAD" as const, storage }`
+LINE permits several devices to be logged in at once, and iPad is one of those slots.
+chatmux occupies the IOSIPAD slot:
 
-## LEGY Push（HTTP/2 長連線）
+- **It does not affect LINE on your phone**, which uses the PRIMARY slot.
+- **Two IOSIPAD clients cannot run at once.** chatmux and line-tui share the slot, so they cannot run simultaneously.
+- **Login parameters**: `{ device: "IOSIPAD" as const, storage }`
 
-LINE 使用 LEGY Push 協議推送即時訊息，是一個 HTTP/2 長連線。
+## LEGY Push (long-lived HTTP/2)
 
-### 為什麼 adapter 必須用 Node+tsx
+LINE pushes real-time messages over the LEGY Push protocol, which is a long-lived HTTP/2
+connection.
 
-LEGY Push 需要 HTTP/2 duplex（雙向同時讀寫同一個 HTTP/2 stream）。**Bun 的 HTTP/2 duplex 實作有 bug**——連線建立後無法同時讀寫。因此 LINE adapter 必須用 Node+tsx runtime。
+### Why the adapter must run on Node+tsx
 
-Core daemon 用 Bun 沒問題——MCP Streamable HTTP 走 HTTP/1.1 + SSE，不需要 HTTP/2。
+LEGY Push requires HTTP/2 duplex — reading and writing the same HTTP/2 stream
+concurrently. **Bun's HTTP/2 duplex implementation is buggy**: once the connection is
+established it cannot read and write at the same time. The LINE adapter therefore has to
+run on the Node+tsx runtime.
 
-### 連線管理（ConnectionManager）
+The core daemon on Bun is unaffected, because MCP Streamable HTTP is HTTP/1.1 + SSE and
+needs no HTTP/2.
 
-從 line-tui `src/connection.ts` 遷移。兩個並行迴圈：
+### Connection management (ConnectionManager)
 
-1. **pushLoop**：呼叫 `initLegyPusher()` 建立 HTTP/2 長連線
-   - 成功 → state = `"connected"`
-   - 網路錯誤 → state = `"reconnecting"` → sleep 5s → 重試（不計入 ErrorTracker）
-   - 其他錯誤 → emit error → 由外部 ErrorTracker 處理
+Migrated from line-tui's `src/connection.ts`. Two concurrent loops:
 
-2. **consumeLoop**：從 `push.stream` ReadableStream 讀取事件
-   - 讀到事件 → dispatch to event listeners
-   - stream 結束（done=true）→ `push.renew()` → sleep 1s → 重新讀取（自動重連）
-   - stream error → catch → renew → retry
+1. **pushLoop** calls `initLegyPusher()` to establish the long-lived HTTP/2 connection.
+   - Success → state becomes `"connected"`.
+   - Network error → state becomes `"reconnecting"` → sleep 5 s → retry. Not counted by ErrorTracker.
+   - Any other error → emit `error` and let the external ErrorTracker handle it.
 
-### 連線狀態
+2. **consumeLoop** reads events from the `push.stream` ReadableStream.
+   - Event read → dispatch to event listeners.
+   - Stream ends (`done=true`) → `push.renew()` → sleep 1 s → read again (automatic reconnect).
+   - Stream error → catch → renew → retry.
 
-| state | 說明 |
-|-------|------|
-| `"connected"` | LEGY Push 連線正常 |
-| `"reconnecting"` | 連線斷開，正在重連 |
-| `"killed"` | 被 KillSwitch 殺掉，不再重連 |
+### Connection states
 
-### 重連策略
+| State | Meaning |
+|-------|---------|
+| `"connected"` | LEGY Push connection is healthy |
+| `"reconnecting"` | Connection dropped, reconnect in progress |
+| `"killed"` | Stopped by the KillSwitch; no further reconnects |
 
-- **網路斷線**（`isNetworkError`）：5 秒後自動重連，不計入 ErrorTracker
-- **stream 結束**：1 秒後 renew stream，自動重連
-- **非網路錯誤**：emit error → adapter runner 的 ErrorTracker 決定 retry/kill
-- **graceful stop**：AbortController abort → 兩個迴圈同時結束
+### Reconnect policy
 
-網路錯誤判斷（`isNetworkError`）：
-- Error code：`ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENETUNREACH`, `EPIPE`
-- Error message：含 `"fetch failed"`, `"network"`, `"socket hang up"`, `"econnrefused"`
+- **Network drop** (`isNetworkError`): reconnect after 5 s, not counted by ErrorTracker.
+- **Stream ended**: renew the stream after 1 s and reconnect automatically.
+- **Non-network error**: emit `error` and let the adapter runner's ErrorTracker decide retry vs. kill.
+- **Graceful stop**: `AbortController.abort()` ends both loops together.
 
-## E2EE（端對端加密）
+Network errors are identified (`isNetworkError`) by:
 
-LINE 訊息端對端加密。linejs 的 `decryptMessage()` 處理解密：
+- Error code: `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENETUNREACH`, `EPIPE`
+- Error message containing `"fetch failed"`, `"network"`, `"socket hang up"`, `"econnrefused"`
+
+## E2EE
+
+LINE messages are end-to-end encrypted. linejs's `decryptMessage()` handles decryption:
 
 ```typescript
 const decrypted = await client.decryptMessage(rawMessage);
 ```
 
-- **E2EE key 儲存**：`$CHATMUX_DATA_DIR/adapters/line/storage.json`（linejs `FileStorage`）
-- chatmux 儲存**明文**（解密後的文字）——FTS5 全文搜尋需要明文。DB 檔案權限 600 是 v0.1 安全基線
-- 解密失敗的訊息標記為 `"[無法解密]"`，不丟棄（保留 metadata）
+- **E2EE key storage**: `$CHATMUX_DATA_DIR/adapters/line/storage.json` (linejs `FileStorage`).
+- chatmux stores **plaintext** — the decrypted text — because FTS5 full-text search needs it. File permissions of 600 on the DB are the v0.1 security baseline.
+- Messages that fail to decrypt are marked `"[無法解密]"` ("cannot decrypt") rather than dropped, so their metadata is preserved.
 
-## QR 碼登入 + authToken 持久化
+## QR code login and authToken persistence
 
-### 首次登入流程
+### First login
 
-1. 沒有 authToken → 啟動 QR 碼登入
-2. 在 terminal 顯示 QR 碼（`qrcode-terminal` library）
-3. 用手機 LINE 掃碼 → 可能要求輸入 PIN
-4. QR 碼 30 秒過期，過期自動生成新的（最多 5 次重試）
-5. 登入成功 → 儲存 authToken 到 `$CHATMUX_DATA_DIR/adapters/line/auth.json`
+1. No authToken present → start QR code login.
+2. Render the QR code in the terminal (the `qrcode-terminal` library).
+3. Scan it with LINE on your phone; a PIN may be requested.
+4. The QR code expires after 30 seconds, and a new one is generated automatically (up to 5 retries).
+5. On success, save the authToken to `$CHATMUX_DATA_DIR/adapters/line/auth.json`.
 
-### 後續登入
+### Subsequent logins
 
-1. 讀取 authToken → `loginWithAuthToken(savedToken, opts)`
-2. 成功 → 直接使用
-3. 失敗（token 過期）→ fallback 到 QR 碼登入
+1. Read the authToken → `loginWithAuthToken(savedToken, opts)`.
+2. Success → proceed.
+3. Failure (expired token) → fall back to QR code login.
 
-### Token 更新
+### Token refresh
 
-linejs 自動更新 token，監聽 `update:authtoken` event：
+linejs refreshes the token itself; listen for the `update:authtoken` event:
 
 ```typescript
 client.base.on("update:authtoken", async (token) => {
@@ -105,90 +116,101 @@ client.base.on("update:authtoken", async (token) => {
 });
 ```
 
-### 路徑遷移
+### Path migration
 
-| 項目 | line-tui | chatmux |
-|------|---------|---------|
+| Item | line-tui | chatmux |
+|------|----------|---------|
 | authToken | `data/auth.json` | `$CHATMUX_DATA_DIR/adapters/line/auth.json` |
 | E2EE storage | `data/storage.json` | `$CHATMUX_DATA_DIR/adapters/line/storage.json` |
 
-## LINE OBS Media 下載
+## LINE OBS media downloads
 
-LINE 圖片/影片/音訊的 URL（OBS URL）需要 auth header 才能存取，且 URL 會過期。
+URLs for LINE images, video, and audio (OBS URLs) require an auth header and expire.
 
-### 處理策略
+### Strategy
 
-收到 media 類型訊息時立即下載到本機：
+Download to local disk as soon as a media message arrives:
 
 ```
-收到 image/video/audio/file 訊息
-  → 立即下載到 $CHATMUX_DATA_DIR/media/line/<message_id>.<ext>
-  → SQLite attachments 表記錄 original_url + local_path
-  → MCP tools 回傳 local_path（不回傳過期的 original_url）
+image/video/audio/file message received
+  → download immediately to $CHATMUX_DATA_DIR/media/line/<message_id>.<ext>
+  → record original_url + local_path in the SQLite attachments table
+  → MCP tools return local_path, never the expired original_url
 ```
 
-## Content Type 對應表
+## Content type mapping
 
-LINE 訊息有多種 content type，adapter 需轉換成統一格式：
+LINE has several content types, which the adapter normalizes:
 
-| LINE contentType | chatmux content.type | 說明 |
-|-----------------|---------------------|------|
-| 0 / `"NONE"` | `"text"` | 純文字 |
-| 1 / `"IMAGE"` | `"image"` | 圖片 |
-| 2 / `"VIDEO"` | `"video"` | 影片 |
-| 3 / `"AUDIO"` | `"audio"` | 語音 |
-| 7 / `"STICKER"` | `"sticker"` | 貼圖（`sticker_id` = contentMetadata.STKID） |
-| 14 / `"FILE"` | `"file"` | 檔案 |
-| 其他 | `"text"` | 格式化為 `"[類型名]"`（如 `"[通話]"`, `"[位置]"`） |
+| LINE contentType | chatmux `content.type` | Notes |
+|------------------|------------------------|-------|
+| 0 / `"NONE"` | `"text"` | Plain text |
+| 1 / `"IMAGE"` | `"image"` | Image |
+| 2 / `"VIDEO"` | `"video"` | Video |
+| 3 / `"AUDIO"` | `"audio"` | Voice |
+| 7 / `"STICKER"` | `"sticker"` | Sticker; `sticker_id` = `contentMetadata.STKID` |
+| 14 / `"FILE"` | `"file"` | File |
+| anything else | `"text"` | Formatted as a bracketed type name, e.g. `"[通話]"` (call), `"[位置]"` (location) |
 
-## Name Resolution（名字解析）
+> These bracketed placeholders are currently zh-TW strings baked into
+> `src/adapters/line/messages.ts`. They are stored as message text, so changing them
+> affects existing rows; treat it as a data decision, not a copy edit.
 
-Adapter 負責所有名字解析，core daemon 只接收已填好 `display_name` 的 event。
+## Name resolution
 
-### Contact 範圍
+The adapter owns all name resolution. The core daemon only ever receives events whose
+`display_name` is already filled in.
 
-`handleGetContacts` 呼叫 `fetchAllContacts`，收集三個來源的 MID：
+### Contact scope
 
-1. **好友**：`getUserFriendIds()` → `getContactsV3(friendMids)`
-2. **群成員**：`getAllChatMids()` → `getChats(chatMids)` → 從 `extra.groupExtra.memberMids` 提取成員 MID
-3. **DM 對象**：`getMessageBoxes()` → u-prefix MID
+`handleGetContacts` calls `fetchAllContacts`, gathering MIDs from three sources:
 
-聯集後 filter 掉已知好友和自己，剩餘 MID 透過 `fetchContactsByMids` batch fetch（BATCH_SIZE=100）。
+1. **Friends**: `getUserFriendIds()` → `getContactsV3(friendMids)`
+2. **Group members**: `getAllChatMids()` → `getChats(chatMids)` → member MIDs from `extra.groupExtra.memberMids`
+3. **DM counterparts**: `getMessageBoxes()` → u-prefixed MIDs
 
-### DM 發現
+After union, known friends and yourself are filtered out, and the remaining MIDs are
+batch-fetched via `fetchContactsByMids` with `BATCH_SIZE=100`.
 
-`handleGetChats` 除了群組，也從 `getMessageBoxes()` 取 u-prefix MID 作為 DM chat（`type: "direct"`），名字從 contacts map 查找。
+### DM discovery
 
-### Event Enrichment（即時事件）
+Besides groups, `handleGetChats` also takes u-prefixed MIDs from `getMessageBoxes()` as
+DM chats (`type: "direct"`), looking up names in the contacts map.
 
-`ContactCache` 在 adapter 啟動後由 `get_contacts` / `get_chats` RPC handler 餵入。收到 live event 時：
+### Event enrichment (live events)
 
-1. `enrichSenderName(senderMid, cache, client)`：cache hit → 回傳名字；cache miss → lazy `getContactsV3` → 加入 cache
-2. MID pattern 防呆：`enrichSenderName` 會檢查 `getContactsV3` 回傳的 displayName 是否為 MID pattern（`/^[uc][0-9a-f]{7}/`），是的話不加入 cache
+`ContactCache` is populated by the `get_contacts` / `get_chats` RPC handlers after adapter
+startup. When a live event arrives:
 
-### Backfill 路徑限制
+1. `enrichSenderName(senderMid, cache, client)` — cache hit returns the name; a miss does a lazy `getContactsV3` and adds the result to the cache.
+2. MID-pattern guard: `enrichSenderName` checks whether the `displayName` returned by `getContactsV3` is itself a MID pattern (`/^[uc][0-9a-f]{7}/`) and, if so, does not cache it.
 
-Backfill 事件走 `handleBackfill` RPC 回傳，不經 `connection.onEvent` enrichment。Backfill 事件的 `sender.display_name` 為 undefined。Core 的 `syncEventToSQLite` 用 `platform_id` 作 fallback INSERT，name protection GLOB 確保後續 enriched event 會覆寫成好名字。
+### Backfill path limitation
 
-## 已知限制
+Backfill events return through the `handleBackfill` RPC and do not pass through
+`connection.onEvent` enrichment, so their `sender.display_name` is undefined. Core's
+`syncEventToSQLite` falls back to inserting `platform_id`, and the name-protection GLOB
+ensures a later enriched event overwrites it with a real name.
 
-1. **Bun HTTP/2 不支援** → adapter 必須 Node+tsx runtime
-2. **首次 QR 碼** → 非無人值守，需人工掃碼
-3. **E2EE key 依賴 linejs** → 換 client library 需要重新登入
-4. **LINE 可能封鎖** → 非官方 API，無保證
-5. **同 IOSIPAD slot 只能一個 client** → chatmux 和 line-tui 不能同時跑
+## Known limitations
 
-## linejs API 已知坑
+1. **No Bun HTTP/2 support** → the adapter must run on Node+tsx.
+2. **First-run QR code** → not unattended; a human has to scan it.
+3. **E2EE keys are linejs-specific** → switching client library means logging in again.
+4. **LINE may ban the account** → unofficial API, no guarantees.
+5. **One client per IOSIPAD slot** → chatmux and line-tui cannot run at the same time.
 
-- `client.base.profile!.mid`（not `client.user.mid`）to get own user ID
-- `getUserFriendIds` 需 `{ request: { blockStatus: "ALL" } }`，回傳 `res.userFriendMids`
-- `getAllChatMids` 需 `{ request: { withMemberChats: true }, syncReason: "INTERNAL" }`
-- `getContactsV3` 需 `{ mids }`，回傳 `res.responses[].targetUserMid` + `targetProfileDetail.profileName`
-- `getContactsV3` 對**非好友也可用**——回傳 `profileName`（live spike 2026-07-24 驗證）
-- `getContactsV3` 的 `profileName` 缺失時回傳空字串（adapter 不再用 `slice(0,8)` fallback）
-- `getChats` 需 `{ chatMids }`，回傳 `res.chats[].chatMid` + `.chatName`
-- `getChats` 的群成員 MID 在 `extra.groupExtra.memberMids`（`Record<string, number>` map，key=MID, value=timestamp），不在 top-level
-- `getPreviousMessages` 不存在——改用 `getPreviousMessagesV2WithRequest({ request: { messageBoxId, endMessageId, messagesCount }, syncReason: "UNKNOWN" })`
-- `getMessageBoxes({ messageBoxListRequest: {} })` 取得所有有訊息的對話（含 1:1 + 群組）
-- `auth.ts` 的 `login()` 需先 `mkdir(dataDir)` 確保目錄存在，否則 `FileStorage` 讀取 storage.json 會 ENOENT
-- `sendCompactMessage({ to: myMid, text })` 送自身 MID 可行——訊息出現在「與自己的聊天」中，回傳正常的 `{ sequenceId, messageId, createdTime }`（live spike 2026-07-24 驗證）。可作為 integration test 的安全 send target
+## linejs API gotchas
+
+- Use `client.base.profile!.mid` (not `client.user.mid`) to get your own user ID.
+- `getUserFriendIds` needs `{ request: { blockStatus: "ALL" } }` and returns `res.userFriendMids`.
+- `getAllChatMids` needs `{ request: { withMemberChats: true }, syncReason: "INTERNAL" }`.
+- `getContactsV3` needs `{ mids }` and returns `res.responses[].targetUserMid` plus `targetProfileDetail.profileName`.
+- `getContactsV3` **works for non-friends too**, returning `profileName` (verified by a live spike on 2026-07-24).
+- When `getContactsV3` has no `profileName` it returns an empty string; the adapter no longer falls back to `slice(0,8)`.
+- `getChats` needs `{ chatMids }` and returns `res.chats[].chatMid` plus `.chatName`.
+- Group member MIDs from `getChats` live at `extra.groupExtra.memberMids` — a `Record<string, number>` map keyed by MID with a timestamp value — not at the top level.
+- `getPreviousMessages` does not exist. Use `getPreviousMessagesV2WithRequest({ request: { messageBoxId, endMessageId, messagesCount }, syncReason: "UNKNOWN" })`.
+- `getMessageBoxes({ messageBoxListRequest: {} })` returns every conversation that has messages, both 1:1 and groups.
+- `login()` in `auth.ts` must `mkdir(dataDir)` first, or `FileStorage` reading `storage.json` fails with ENOENT.
+- `sendCompactMessage({ to: myMid, text })` works when sending to your own MID: the message appears in your self-chat and returns a normal `{ sequenceId, messageId, createdTime }` (verified by a live spike on 2026-07-24). This makes a safe send target for integration tests.

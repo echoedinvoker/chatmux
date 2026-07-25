@@ -1,16 +1,16 @@
 # Storage Schema
 
-chatmux 使用方案 C：**JSONL truth source + SQLite query view**。
+chatmux uses option C: **JSONL truth source + SQLite query view**.
 
-## 設計理由
+## Why
 
-- **JSONL**（append-only）：不可變事件日誌，是資料的唯一真相。未來 rebuild engine（v0.2）可從 JSONL 重建 SQLite
-- **SQLite**（query view）：從 JSONL 同步建立的可查詢 view。提供 FTS5 全文搜尋、pagination、stats
-- **同步寫入**：receive event → append JSONL → INSERT OR IGNORE SQLite。不做 async queue，降低複雜度
+- **JSONL** (append-only) is an immutable event log and the single source of truth. A future rebuild engine (v0.2) can reconstruct SQLite from it.
+- **SQLite** is a queryable view synced from JSONL. It provides FTS5 full-text search, pagination, and stats.
+- **Synchronous writes**: receive event → append JSONL → `INSERT OR IGNORE` into SQLite. No async queue, which keeps the complexity down.
 
-## JSONL Event Schema
+## JSONL event schema
 
-每行一個 JSON object，append-only 寫入 `$CHATMUX_DATA_DIR/events.jsonl`。
+One JSON object per line, appended to `$CHATMUX_DATA_DIR/events.jsonl`.
 
 ```json
 {
@@ -37,22 +37,22 @@ chatmux 使用方案 C：**JSONL truth source + SQLite query view**。
 }
 ```
 
-| 欄位 | 型別 | 說明 |
-|------|------|------|
+| Field | Type | Purpose |
+|-------|------|---------|
 | `type` | string | Event type: `message`, `read_receipt`, `unsend` |
-| `platform` | string | 平台 ID: `line` |
-| `platform_message_id` | string | 平台原生訊息 ID |
-| `chat` | object | 聊天室資訊 |
-| `sender` | object | 發送者資訊 |
-| `timestamp` | number | 平台時間戳（ms） |
-| `content` | object | 訊息內容（依 type 變化） |
-| `raw` | object | 平台原始資料（debug 用，不索引） |
-| `received_at` | number | chatmux 收到時間（ms） |
-| `source` | string | `"live"`（推送）或 `"backfill"`（歷史拉取） |
+| `platform` | string | Platform ID, e.g. `line` |
+| `platform_message_id` | string | The platform's own message ID |
+| `chat` | object | Chat information |
+| `sender` | object | Sender information |
+| `timestamp` | number | Platform timestamp (ms) |
+| `content` | object | Message content; shape varies by type |
+| `raw` | object | Raw platform payload, for debugging. Not indexed |
+| `received_at` | number | When chatmux received it (ms) |
+| `source` | string | `"live"` (pushed) or `"backfill"` (fetched history) |
 
-## SQLite Schema
+## SQLite schema
 
-5 個 table + 1 個 FTS5 virtual table。
+Four tables plus one FTS5 virtual table.
 
 ### contacts
 
@@ -87,9 +87,20 @@ CREATE TABLE chats (
 );
 ```
 
-**`type` 的唯一權威是 adapter 的 `get_chats`**。欄位是 `NOT NULL CHECK`，沒有 "unknown" 可填——所以 core **不從其他訊號推斷 type**。曾經有一版用「contacts 表查得到顯示名就算 direct」來猜，那在 LINE（1799 contacts）成立、在 contacts 稀疏或抓取失敗的平台會把每個私聊判成 group。現在 `get_chats` 沒回報的對話一律跳過並 WARN，不發明資料。
+**The adapter's `get_chats` is the sole authority on `type`.** The column is
+`NOT NULL CHECK`, so there is no "unknown" value to fall back on — which means core
+**never infers type from another signal**. An earlier version guessed "if the contacts
+table has a display name for it, it is a direct chat". That happens to hold on LINE
+(1799 contacts) and misclassifies every DM as a group on any platform where contacts are
+sparse or the fetch failed. Chats that `get_chats` did not report are now skipped with a
+WARN rather than invented.
 
-**`last_message_at` 的 NULL 語義**：NULL = 「adapter 沒給排序訊號」，不是「很久以前」。寫入時用 `MAX(COALESCE(...))` 保護既有值，但**外層必須包 `NULLIF(..., 0)`**——否則兩邊皆 NULL 時會寫進 epoch `0`，讓「完全沒有排序訊號」偽裝成一個真實時間戳，使 backfill 排序退化**檢查不出來**。`ORDER BY last_message_at DESC NULLS LAST` 依賴這個區分。
+**NULL semantics for `last_message_at`**: NULL means "the adapter gave no ordering
+signal", not "a long time ago". Writes guard existing values with
+`MAX(COALESCE(...))`, but that **must be wrapped in `NULLIF(..., 0)`** — otherwise, when
+both sides are NULL, epoch `0` gets written, disguising "no ordering signal at all" as a
+real timestamp and making a degraded backfill ordering **undetectable**.
+`ORDER BY last_message_at DESC NULLS LAST` depends on that distinction.
 
 ### messages
 
@@ -114,29 +125,43 @@ CREATE INDEX idx_messages_chat_timestamp ON messages(chat_id, timestamp DESC);
 CREATE INDEX idx_messages_timestamp ON messages(timestamp DESC);
 ```
 
-#### `id` 是寫入順序，`timestamp` 是事件時間——兩者不同
+#### `id` is write order; `timestamp` is event time. They are not the same
 
-`AUTOINCREMENT` 保證 `id` **單調遞增且永不重用**。它記錄的是「core 第幾次接受這筆寫入」，跟訊息本身發生的時間無關：
+`AUTOINCREMENT` guarantees `id` is **monotonic and never reused**. It records "the Nth
+write core accepted", which has nothing to do with when the message itself happened:
 
 ```
-寫入順序 (id)   timestamp        source
-    1           5000             live       ← 剛收到的即時訊息
-    2           1000             backfill   ← 回填的舊訊息，timestamp 更小
+write order (id)   timestamp        source
+       1           5000             live       ← a message that just arrived
+       2           1000             backfill   ← older history, smaller timestamp
 ```
 
-這個差異是 `read_events` cursor 存在的理由。consumer 若用 `timestamp` 記進度（`read_messages({ after: 5000 })`），上表第 2 筆**永遠不會被看到**——它的 timestamp 落在水位線以下。用 `id` 當 cursor 就正常送達。
+This gap is the entire reason the `read_events` cursor exists. A consumer tracking
+progress by `timestamp` (`read_messages({ after: 5000 })`) **never sees row 2** — its
+timestamp falls below the watermark. With `id` as the cursor it arrives normally.
 
-推論：
+Consequences:
 
-- **不要**假設 `ORDER BY id` 等於 `ORDER BY timestamp`
-- **不要**把 `id` 當訊息身分對外暴露（NEVER #4）——對外身分是 `platform:platform_message_id`。cursor 是**位置**不是身分，所以以 opaque token（`evt:<id>`）形式輸出
-- 從 JSONL 重建 SQLite 會 replay 同樣的檔案順序，因此重建後 `id` 可重現
+- **Do not** assume `ORDER BY id` equals `ORDER BY timestamp`.
+- **Do not** expose `id` as message identity (NEVER #4). External identity is
+  `platform:platform_message_id`. A cursor is a *position*, not an identity, which is
+  why it is emitted as an opaque token (`evt:<id>`).
+- Rebuilding SQLite from JSONL replays the same file order, so `id` values are
+  reproducible across a rebuild.
 
-**序列是稀疏的**：`INSERT OR IGNORE` 撞到 `UNIQUE(platform, platform_message_id)` 時，AUTOINCREMENT 值**已經配掉且不回收**。backfill 重送既有訊息（NEVER #7 預期的情況）會持續燒序列而不新增列。實測某個 1644 筆訊息的 DB，`MAX(id)` 已達 18744、`sqlite_sequence` 到 20837、序列中有 37 個斷點。
+**The sequence is sparse.** When `INSERT OR IGNORE` hits
+`UNIQUE(platform, platform_message_id)`, the AUTOINCREMENT value **has already been
+allocated and is not reclaimed**. Backfill re-sending messages that already exist (the
+situation NEVER #7 anticipates) keeps burning sequence numbers without adding rows. On a
+real store of 1644 messages, `MAX(id)` had reached 18744, `sqlite_sequence` stood at
+20837, and the sequence contained 37 gaps.
 
-推論：`MAX(id)` 與列數無關，cursor 之間的差值**不代表筆數**。
+Consequence: `MAX(id)` bears no relation to the row count, and the difference between two
+cursors **is not a count of messages**.
 
-`getHeadSeq()` 刻意用 `MAX(id)` 而非 `sqlite_sequence`——後者會回報一個尚未有任何列存在的位置，讓剛啟動的 consumer 一開始就「超前 head」，誤觸重置邏輯。
+`getHeadSeq()` deliberately uses `MAX(id)` rather than `sqlite_sequence`. The latter
+names a position no row occupies, which would make a freshly started consumer look like
+it was already ahead of the log and trip its reset path.
 
 ### attachments
 
@@ -154,7 +179,7 @@ CREATE TABLE attachments (
 );
 ```
 
-### messages_fts（FTS5 全文搜尋）
+### messages_fts (FTS5 full-text search)
 
 ```sql
 CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -165,39 +190,44 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 );
 ```
 
-FTS5 trigram tokenizer 處理 CJK 子字串搜尋。
+The FTS5 trigram tokenizer is what makes CJK substring search work.
 
-## 統一 ID Scheme
+## Unified ID scheme
 
-| 場景 | 格式 | 範例 |
-|------|------|------|
-| 對外暴露（MCP tools/resources） | `platform:platform_id` | `line:u1234567890` |
-| SQLite 內部 FK | auto-increment PK | `42` |
-| Dedup constraint | UNIQUE(platform, platform_id) 或 UNIQUE(platform, platform_message_id) | — |
+| Context | Format | Example |
+|---------|--------|---------|
+| Exposed externally (MCP tools/resources) | `platform:platform_id` | `line:u1234567890` |
+| Internal SQLite FK | auto-increment PK | `42` |
+| Dedup constraint | `UNIQUE(platform, platform_id)` or `UNIQUE(platform, platform_message_id)` | — |
 
-MCP tools 接收和回傳都用 `platform:platform_id` 複合 ID。SQLite 內部用 auto-increment PK 做 FK join，避免 composite key join 的複雜度。
+MCP tools accept and return the composite `platform:platform_id`. SQLite uses
+auto-increment PKs for FK joins internally, avoiding the complexity of composite-key
+joins.
 
-## FTS5 雙 Tokenizer 策略
+## FTS5 tokenizer strategy
 
-### 問題
+### The problem
 
-FTS5 trigram tokenizer 對 **< 3 字元的 CJK 子字串命中率 0%**（如「午餐」「冥想」「散步」都是 2 字，trigram 需要至少 3 字元才能匹配）。
+The FTS5 trigram tokenizer has a **0% hit rate on CJK substrings shorter than three
+characters**. Many common Chinese terms are exactly two characters — 午餐 (lunch),
+冥想 (meditation), 散步 (a walk) — and trigram needs at least three to match anything.
 
-### 策略
+### The strategy
 
-E1 spike 驗證 trigram 對 ≥ 3 字 CJK 召回率 85%，查詢延遲 max 0.327ms。2 字 CJK 的 workaround：
+The E1 spike measured trigram recall at 85% for CJK queries of three characters or more,
+with worst-case query latency of 0.327 ms. Two-character CJK needs a workaround.
 
-**Phase 2.1 TDD 驗證結果：採用方案 B（trigram + LIKE fallback）**
+**Phase 2.1 TDD result: option B (trigram + LIKE fallback) was adopted.**
 
-- `messages_fts` 只用 trigram tokenizer
-- query 長度 ≥ 3 字 → FTS5 查詢（有索引，sub-ms）
-- query 長度 < 3 字 → `SELECT ... WHERE content_text LIKE '%午餐%'`（全表掃描，10k 筆 sub-ms）
-- 實測結果：20 個 2 字中文測試詞召回 20/20 = 100%（超過 80% 門檻）
-- 選擇理由：最簡單且效能可接受，方案 A 的雙 FTS5 table 複雜度不值得
+- `messages_fts` uses the trigram tokenizer only.
+- Query length ≥ 3 → FTS5 query (indexed, sub-millisecond).
+- Query length < 3 → `SELECT ... WHERE content_text LIKE '%午餐%'` (full table scan, still sub-millisecond at 10k rows).
+- Measured: 20 of 20 two-character Chinese test terms recalled, i.e. 100%, against an 80% threshold.
+- Chosen because it is the simplest approach with acceptable performance. Option A's dual FTS5 tables were not worth the complexity.
 
-### FTS5 同步 Trigger
+### FTS5 sync triggers
 
-INSERT/DELETE trigger 從 messages 同步到 messages_fts：
+INSERT and DELETE triggers keep `messages_fts` in step with `messages`:
 
 ```sql
 CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages
@@ -211,40 +241,42 @@ BEGIN
 END;
 ```
 
-## 同步寫入流程
+## Synchronous write path
 
 ```
-receive event (from adapter stdio notification)
+receive event (from an adapter stdio notification)
   │
-  ├─ 1. Append to JSONL (truth source, always succeeds unless disk full)
+  ├─ 1. Append to JSONL (truth source; always succeeds unless the disk is full)
   │
   ├─ 2. INSERT OR IGNORE into SQLite:
   │     a. UPSERT contacts (platform, platform_id)
-  │     b. UPSERT chats (platform, platform_id) + update last_message_at
+  │     b. UPSERT chats (platform, platform_id) and update last_message_at
   │     c. INSERT OR IGNORE messages (platform, platform_message_id)
-  │     d. FTS5 trigger auto-fires
-  │     e. INSERT attachments (if media content)
+  │     d. FTS5 trigger fires automatically
+  │     e. INSERT attachments (for media content)
   │
-  └─ 3. 若 SQLite INSERT 失敗:
-        a. JSONL 已寫入（不可回滾，by design）
-        b. Log warning
-        c. 啟動時 sync check 會偵測 JSONL 有但 SQLite 沒有的 event → retry sync
+  └─ 3. If the SQLite INSERT fails:
+        a. JSONL is already written — not rolled back, by design
+        b. Log a warning
+        c. The startup sync check finds events present in JSONL but missing from
+           SQLite and retries the sync
 ```
 
-### Dedup 語義
+### Dedup semantics
 
-- **同一 event 寫兩次**（backfill × live event 交錯）：JSONL 會有兩行（append-only），SQLite 只有一筆（INSERT OR IGNORE）。JSONL 行數 > SQLite 筆數是正常的。
-- **啟動時 sync check**：比較 JSONL 最後 100 行的 platform_message_id 是否都存在於 SQLite。有遺漏 → log warning + retry sync（不 abort）。
+- **The same event written twice** (backfill interleaving with a live event): JSONL gets two lines, being append-only; SQLite gets one row, thanks to `INSERT OR IGNORE`. More JSONL lines than SQLite rows is normal and expected.
+- **Startup sync check**: verifies that the `platform_message_id` of each of the last 100 JSONL lines exists in SQLite. Anything missing logs a warning and retries the sync; it never aborts startup.
 
-## 容量估算
+## Capacity estimate
 
-以個人使用量估算（~1000 訊息/天）：
+For personal usage of roughly 1000 messages per day:
 
-| 項目 | 每筆 | 每天 | 每年 |
-|------|------|------|------|
+| Item | Per message | Per day | Per year |
+|------|-------------|---------|----------|
 | JSONL | ~500 bytes | ~500 KB | ~170 MB |
 | SQLite messages | ~200 bytes | ~200 KB | ~70 MB |
-| FTS5 index | ~1.5x content | — | ~100 MB |
-| Media | 不定 | — | 依使用而定 |
+| FTS5 index | ~1.5× content | — | ~100 MB |
+| Media | varies | — | depends on usage |
 
-**總計**：~340 MB/年（不含 media），個人使用完全可接受。
+**Total**: roughly 340 MB per year excluding media, which is entirely acceptable for
+personal use.

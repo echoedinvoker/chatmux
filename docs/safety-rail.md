@@ -1,68 +1,72 @@
 # SafetyRail
 
-三層防護 + 雙層設計，確保 chatmux 不會意外騷擾聊天對象或因錯誤無限重試。
+Three layers of protection in a two-tier design, so chatmux can never accidentally spam
+the people you talk to or retry a failure forever.
 
-## 三層架構
+## Three layers
 
 ```
-send_message 請求
+send_message request
   │
-  ├─ Layer 1: RateLimiter（頻率控制）
-  │   └─ 超限 → 排隊等待（不拒絕，等 window 過）
+  ├─ Layer 1: RateLimiter (frequency control)
+  │   └─ over limit → queue and wait (does not reject; waits out the window)
   │
-  ├─ Layer 2: ErrorTracker（連續錯誤退避）
-  │   └─ 連續失敗 → 指數退避 5→10→20s
-  │   └─ 達 kill threshold → 觸發 KillSwitch
+  ├─ Layer 2: ErrorTracker (consecutive-error backoff)
+  │   └─ consecutive failures → exponential backoff 5 → 10 → 20 s
+  │   └─ reaches the kill threshold → trips the KillSwitch
   │
-  └─ Layer 3: KillSwitch（緊急停止）
-      └─ 觸發 → 斷開 adapter 連線，需手動 reset
+  └─ Layer 3: KillSwitch (emergency stop)
+      └─ tripped → disconnect the adapter, manual reset required
 ```
 
 ### RateLimiter
 
-滑動視窗 rate limiter，追蹤最近 60 秒內的發送次數。
+Sliding-window rate limiter tracking sends over the last 60 seconds.
 
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `maxPerMinute` | 5 | 每分鐘最大發送數 |
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `maxPerMinute` | 5 | Maximum sends per minute |
 
-行為：
-- 未超限 → 立即通過，記錄時間戳
-- 超限 → 排入佇列，等最早的時間戳超過 60 秒後自動釋放
-- 不拒絕請求，只延遲（避免丟失合法訊息）
+Behavior:
+
+- Under the limit → passes immediately, records a timestamp.
+- Over the limit → queues, and releases automatically once the oldest timestamp ages past 60 seconds.
+- Never rejects a request, only delays it — dropping a legitimate message would be worse.
 
 ### ErrorTracker
 
-追蹤連續錯誤次數，指數退避。
+Counts consecutive errors and backs off exponentially.
 
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `killThreshold` | 3 | 連續幾次錯誤觸發 kill |
-| `initialBackoffMs` | 5,000 | 首次退避毫秒 |
-| `maxBackoffMs` | 20,000 | 最大退避毫秒 |
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `killThreshold` | 3 | Consecutive errors that trip a kill |
+| `initialBackoffMs` | 5,000 | First backoff, in milliseconds |
+| `maxBackoffMs` | 20,000 | Maximum backoff, in milliseconds |
 
-行為：
-- 錯誤 → `consecutiveErrors++` → sleep(backoffMs) → `backoffMs *= 2`（上限 `maxBackoffMs`）
-- 成功 → `reset()`（計數歸零、退避回初始值）
-- 連續錯誤達 `killThreshold` → return `"kill"` → 觸發 KillSwitch
-- **網路錯誤排除**：`isNetworkError(err)` 為 true 時不計入（網路斷線由重連機制處理）
+Behavior:
+
+- Error → `consecutiveErrors++` → `sleep(backoffMs)` → `backoffMs *= 2`, capped at `maxBackoffMs`.
+- Success → `reset()`: counter to zero, backoff back to its initial value.
+- Consecutive errors reaching `killThreshold` → returns `"kill"` → trips the KillSwitch.
+- **Network errors are excluded**: when `isNetworkError(err)` is true the error is not counted, because a dropped connection is the reconnect logic's problem, not a send-policy failure.
 
 ### KillSwitch
 
-緊急停止開關。
+The emergency stop.
 
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `threshold` | 1 | anomaly 記錄幾次後觸發 kill（SafetyRail 預設 1，即 ErrorTracker kill 一次就觸發） |
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `threshold` | 1 | Anomalies recorded before a kill trips. SafetyRail uses 1, so a single ErrorTracker kill is enough |
 
-行為：
-- `recordAnomaly()` → 累計，達 threshold → `killed = true` → 觸發所有 kill listeners
-- `recordNormal()` → anomaly 計數歸零（但不清除 killed 狀態）
-- `reset()` → killed = false + 計數歸零（手動恢復）
+Behavior:
 
-### SafetyRail Facade
+- `recordAnomaly()` → accumulates; at the threshold sets `killed = true` and fires every kill listener.
+- `recordNormal()` → resets the anomaly count, but does **not** clear `killed`.
+- `reset()` → `killed = false` and count to zero. This is the manual recovery path.
 
-組合三層為統一介面。
+### SafetyRail facade
+
+Composes the three layers behind one interface.
 
 ```typescript
 class SafetyRail {
@@ -70,24 +74,27 @@ class SafetyRail {
   errorTracker: ErrorTracker;    // kill at 3, backoff 5→10→20s
   killSwitch: KillSwitch;        // threshold 1
 
-  recordError(err): void;        // 網路錯誤跳過；其餘觸發 ErrorTracker → 可能觸發 KillSwitch
-  recordSuccess(): void;         // reset ErrorTracker + KillSwitch.recordNormal()
-  reset(): void;                 // 全部歸零（手動恢復用）
-  onKill(fn): void;              // 註冊 kill callback
+  recordError(err): void;        // skips network errors; otherwise drives ErrorTracker,
+                                 // which may trip the KillSwitch
+  recordSuccess(): void;         // resets ErrorTracker + KillSwitch.recordNormal()
+  reset(): void;                 // clears everything (manual recovery)
+  onKill(fn): void;              // register a kill callback
 }
 ```
 
-## 雙層設計（Core + Adapter）
+## Two-tier design (Core + Adapter)
 
-### 架構強制原理
+### Why the architecture enforces it
 
-Adapter 是 child process，**只能透過 stdio 跟 core 通訊**。所有 `send_message` 必須從 MCP tool → core SafetyRail → adapter runner → adapter。不存在繞過 SafetyRail 的路徑。
+An adapter is a child process and **can only reach core over stdio**. Every
+`send_message` therefore travels MCP tool → core SafetyRail → adapter runner → adapter.
+There is no code path that bypasses SafetyRail.
 
-### 兩層如何互動
+### How the two tiers interact
 
-1. **Core 底線**：SafetyRail 預設 5/min，是安全網
-2. **Adapter 回報**：`initialize` response 包含 `platform_rate_limits`
-3. **取嚴者**：core 比較自己的預設 vs adapter 回報，取嚴的那個
+1. **Core sets the floor.** SafetyRail defaults to 5/min as the safety net.
+2. **The adapter reports.** Its `initialize` response includes `platform_rate_limits`.
+3. **The stricter value wins.** Core compares its own default against what the adapter reported and takes whichever is tighter.
 
 ```
 Core default: 5/min
@@ -99,63 +106,70 @@ Adapter reports: 10/min
 → Core uses: 5/min (core default is stricter, adapter cannot loosen)
 ```
 
-**Adapter 只能更嚴，不能放寬**——core 底線是最後防線。
+**An adapter can only tighten, never loosen** — the core floor is the last line of defense.
 
-### 為什麼不讓 adapter 自己 rate limit
+### Why adapters do not rate-limit themselves
 
-- Adapter crash/restart 會丟失計數器狀態
-- 多 adapter 場景（v0.2+）core 需要全局視角
-- 安全邊界在 core，adapter 是不受信任的——哪怕 adapter 被惡意修改也不能繞過 core
+- An adapter crash or restart loses the counter state.
+- With multiple adapters (v0.2+), core is the only place with a global view.
+- The security boundary lives in core, and adapters are untrusted. Even a maliciously
+  modified adapter must not be able to get around core.
 
-## ErrorTracker 實例分離
+## Separate ErrorTracker instances
 
-chatmux 有**兩個獨立的 ErrorTracker + KillSwitch 實例**，各自計數互不干擾：
+chatmux runs **two independent ErrorTracker + KillSwitch pairs** whose counts never
+interfere with each other.
 
-### (A) SafetyRail 內：send failure
+### (A) Inside SafetyRail: send failures
 
-| 項目 | 值 |
-|------|-----|
-| 追蹤什麼 | `send_message` 連續失敗 |
+| Item | Value |
+|------|-------|
+| Tracks | Consecutive `send_message` failures |
 | ErrorTracker kill threshold | 3 |
-| KillSwitch 動作 | 斷開 adapter 連線 |
-| 恢復方式 | `safetyRail.reset()`（手動） |
+| KillSwitch action | Disconnect the adapter |
+| Recovery | `safetyRail.reset()` (manual) |
 
-### (B) Adapter Runner：process crash
+### (B) In the Adapter Runner: process crashes
 
-| 項目 | 值 |
-|------|-----|
-| 追蹤什麼 | adapter child process 連續 crash（exit non-zero） |
+| Item | Value |
+|------|-------|
+| Tracks | Consecutive adapter child-process crashes (non-zero exit) |
 | ErrorTracker kill threshold | 5 |
-| KillSwitch 動作 | 停止重啟嘗試 |
-| 恢復方式 | daemon 重啟或 `adapterRunner.reset()`（手動） |
+| KillSwitch action | Stop attempting restarts |
+| Recovery | Restart the daemon, or `adapterRunner.reset()` (manual) |
 
-**為什麼分開**：
-- Send failure 和 process crash 是不同的故障模式
-- Adapter 可能正常運行但 send 持續失敗（例如對方已封鎖）→ 只 kill send，不停 adapter
-- Adapter 可能 crash 但 send 沒問題（例如 push connection bug）→ 只停重啟，不影響 SafetyRail 計數
+**Why they are separate:**
 
-## 恢復流程
+- Send failures and process crashes are different failure modes.
+- An adapter can be perfectly healthy while sends keep failing — for instance the
+  recipient blocked you. Kill sending, do not stop the adapter.
+- An adapter can crash while sending is fine — a push-connection bug, say. Stop
+  restarting it without touching SafetyRail's counters.
 
-### 自動恢復
+## Recovery
 
-- **send 成功** → `SafetyRail.recordSuccess()` 自動清除 ErrorTracker 計數 + KillSwitch anomaly（但不清除 killed 狀態）
-- **adapter 正常啟動** → Adapter Runner ErrorTracker 自動清除計數
+### Automatic
 
-### 手動恢復（KillSwitch 觸發後）
+- **A successful send** → `SafetyRail.recordSuccess()` clears the ErrorTracker count and the KillSwitch anomaly count (but not a `killed` state).
+- **An adapter starting cleanly** → the Adapter Runner's ErrorTracker clears its count.
 
-KillSwitch 一旦 `killed = true`，不會自動恢復。需要：
+### Manual, after a KillSwitch trip
 
-1. `safetyRail.reset()`（清除 SafetyRail 的 KillSwitch）
-2. 或重啟 daemon（清除所有狀態）
+Once `killed = true`, nothing recovers on its own. Either:
 
-v0.1 手動恢復方式：重啟 daemon（`systemctl --user restart chatmux`）。v0.2 考慮 MCP tool `reset_safety`。
+1. Call `safetyRail.reset()` to clear SafetyRail's KillSwitch, or
+2. Restart the daemon to clear all state.
 
-## 遷移來源
+In v0.1 the manual path is a daemon restart (`systemctl --user restart chatmux`). A
+`reset_safety` MCP tool is under consideration for v0.2.
 
-SafetyRail 從 line-tui `src/safety.ts`（164 lines）直接搬運。核心邏輯不變，差異：
+## Provenance
 
-| 項目 | line-tui | chatmux |
-|------|---------|---------|
-| `isNetworkError` 判斷 | import from `connection.ts` | 需抽象化（adapter 平台無關） |
-| KillSwitch callback | 直接停 TUI | 通知 adapter runner 斷連 |
-| Adapter runner ErrorTracker | 不存在 | 新增，kill at 5 |
+SafetyRail was lifted from line-tui's `src/safety.ts` (164 lines). The core logic is
+unchanged; the differences are:
+
+| Item | line-tui | chatmux |
+|------|----------|---------|
+| `isNetworkError` check | imported from `connection.ts` | needs abstracting — core is platform-agnostic |
+| KillSwitch callback | stopped the TUI directly | tells the adapter runner to disconnect |
+| Adapter runner ErrorTracker | did not exist | added, kill at 5 |

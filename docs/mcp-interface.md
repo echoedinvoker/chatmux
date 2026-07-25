@@ -1,57 +1,66 @@
 # MCP Interface
 
-chatmux 透過 MCP Streamable HTTP 暴露 6 個 tools + 4 個 resources + resource subscription，**同時開兩個 listener**。
+chatmux exposes 6 tools, 4 resources, and resource subscription over MCP Streamable
+HTTP, on **two listeners at once**.
 
-## 傳輸
+## Transport
 
-- **Protocol**：MCP Streamable HTTP（HTTP/1.1 + SSE）
-- **SDK**：`@modelcontextprotocol/sdk`
+- **Protocol**: MCP Streamable HTTP (HTTP/1.1 + SSE)
+- **SDK**: `@modelcontextprotocol/sdk`
 
-兩個 listener 共用同一組 handler 與 session 狀態，功能完全一致，差別只在誰連得上：
+Both listeners share one handler and one session map. They are functionally identical;
+the only difference is who can reach them.
 
-| Listener | 位址 | 給誰用 | 為什麼 |
-|----------|------|--------|--------|
-| **Unix socket** | `$CHATMUX_SOCKET`（預設 `~/.local/share/chatmux/chatmux.sock`） | 同機的 sidecar / plugin consumer（如 chat.nvim 的 Bun sidecar） | 檔案權限即存取控制；Bun 的 `fetch({ unix })` 直接支援 |
-| **TCP** | `127.0.0.1:<port>`（預設 `7717`） | 標準 MCP client（Claude Code 等） | **MCP spec 只定義 stdio 與 streamable HTTP 兩種 transport，不含 unix socket** |
+| Listener | Address | Intended for | Why |
+|----------|---------|--------------|-----|
+| **Unix socket** | `$CHATMUX_SOCKET` (default `~/.local/share/chatmux/chatmux.sock`) | Same-host sidecar / plugin consumers, e.g. chat.nvim's Bun sidecar | File permissions *are* the access control, and Bun's `fetch({ unix })` supports it directly |
+| **TCP** | `127.0.0.1:<port>` (default `7717`) | Standard MCP clients such as Claude Code | **The MCP spec defines only stdio and streamable HTTP as transports — there is no unix socket option** |
 
-> ⚠️ **不要把 unix socket 路徑餵給 Claude Code**。MCP 設定沒有 `socketPath` 這個欄位——client 只接受 stdio（`command`/`args`）或 streamable HTTP 的 TCP `url`。這是 spec 層級的限制，不是實作缺漏。
+> ⚠️ **Do not hand the unix socket path to Claude Code.** MCP client configuration has no
+> `socketPath` field: a client accepts either stdio (`command`/`args`) or a streamable
+> HTTP TCP `url`. This is a limitation of the spec, not a gap in the implementation.
 
-### Claude Code 設定
+### Configuring Claude Code
 
 ```bash
 claude mcp add --transport http chatmux http://127.0.0.1:7717/mcp
 ```
 
-驗證連線：
+Verify the connection:
 
 ```bash
 claude mcp list
 # chatmux: http://127.0.0.1:7717/mcp (HTTP) - ✔ Connected
 ```
 
-### TCP port 設定
+### TCP port configuration
 
-優先序：環境變數 > 設定檔 > 預設值。
+Precedence: environment variable > config file > default.
 
-| 來源 | 形式 | 備註 |
-|------|------|------|
-| `CHATMUX_MCP_PORT` | 環境變數 | 最高優先 |
-| `adapters.json` 的 `mcp.port` | `{ "mcp": { "port": 7717 }, "adapters": [...] }` | 次之 |
-| 預設 | `7717` | 都沒設定時 |
+| Source | Form | Notes |
+|--------|------|-------|
+| `CHATMUX_MCP_PORT` | Environment variable | Highest precedence |
+| `mcp.port` in `adapters.json` | `{ "mcp": { "port": 7717 }, "adapters": [...] }` | Next |
+| Default | `7717` | When neither is set |
 
-設 `0` 可**停用 TCP listener**，只留 unix socket。
+Setting `0` **disables the TCP listener**, leaving only the unix socket.
 
-值不合法（非整數、超出 `0-65535`）時 daemon 直接啟動失敗，不會安靜退回預設值。
+An invalid value (non-integer, or outside `0-65535`) fails daemon startup outright. It
+never silently falls back to the default.
 
-**安全性**：TCP listener 只綁 `127.0.0.1`，永不綁 wildcard——聊天全文都在這條線上。但要注意 loopback 沒有 unix socket 的檔案權限保護：**同機任何 process 都連得上**。多使用者主機或不信任同機程式時，設 `mcp.port: 0` 關掉 TCP，改用 unix socket。
+**Security**: the TCP listener binds `127.0.0.1` only, never a wildcard — the full text
+of your conversations travels over it. Note that loopback lacks the file-permission
+protection a unix socket has: **any process on the same host can connect**. On a
+multi-user machine, or when you do not trust other local programs, set `mcp.port: 0` and
+use the unix socket instead.
 
 ## Tools
 
 ### `list_chats`
 
-列出所有聊天。支援平台篩選、搜尋、分頁。
+Lists chats, with platform filtering, search, and pagination.
 
-**Input Schema**：
+**Input schema:**
 ```json
 {
   "type": "object",
@@ -64,7 +73,7 @@ claude mcp list
 }
 ```
 
-**Output 範例**：
+**Example output:**
 ```json
 {
   "chats": [
@@ -89,9 +98,9 @@ claude mcp list
 
 ### `read_messages`
 
-讀取特定聊天的訊息。支援 cursor-based pagination（before/after timestamp）。
+Reads messages from one chat, paginated by timestamp (`before` / `after`).
 
-**Input Schema**：
+**Input schema:**
 ```json
 {
   "type": "object",
@@ -105,7 +114,7 @@ claude mcp list
 }
 ```
 
-**Output 範例**：
+**Example output:**
 ```json
 {
   "messages": [
@@ -131,11 +140,15 @@ claude mcp list
 
 ### `read_events`
 
-從 cursor 續讀事件日誌。這是 **push consumer 的基礎 primitive**——回答「這個位置之後發生了什麼」。
+Resume reading the event log from a cursor. This is the **base primitive for push
+consumers** — it answers "what happened after this position?"
 
-**為什麼不能用 `read_messages({ after })` 代替**：`after` 篩的是 **timestamp**，而 backfill 會插入比既有資料更舊的訊息。consumer 用 timestamp 記進度，那些訊息**永遠看不到**。cursor 走的是 **core 接受寫入的順序**，所以照樣送達。
+**Why `read_messages({ after })` cannot substitute for it:** `after` filters on
+**timestamp**, and backfill inserts messages older than everything already stored. A
+consumer tracking progress by timestamp **never sees them**. The cursor follows **the
+order in which core accepted writes**, so they arrive normally.
 
-**Input Schema**：
+**Input schema:**
 ```json
 {
   "type": "object",
@@ -146,7 +159,7 @@ claude mcp list
 }
 ```
 
-**Output 範例**：
+**Example output:**
 ```json
 {
   "events": [
@@ -168,36 +181,39 @@ claude mcp list
 }
 ```
 
-**Cursor 契約**：
+**The cursor contract:**
 
-| 規則 | 說明 |
-|------|------|
-| **Opaque** | cursor 是不透明 token。原封不動回傳，**不要 parse、比較大小或做算術**。編碼將來會變 |
-| **省略 `since`** | 回傳當前 head、events 為空。新 consumer 用這個「從現在開始跟」，不必 replay 全部歷史 |
-| **`next_cursor`** | 下次呼叫要傳回來的位置。沒有新事件時**維持原位**，所以閒置的 consumer 不會失去有效 cursor |
-| **`head_cursor`** | 日誌目前的尾端。若你存的 cursor 超前 head（SQLite 被重建或截斷），代表該重置——否則會永久停滯 |
-| **無效 cursor** | 回 `{ "error": "invalid_cursor", "detail": ... }`，不是靜默回空 |
-| **順序** | 事件依 core 接受順序**遞增**排列，與 `timestamp` 順序無關 |
-| **稀疏** | cursor 序列**有斷點，不連續**。不要假設相鄰、也**不要用兩個 cursor 相減當待處理筆數**——實測 1644 筆訊息的序列已燒到 18744。只能問「有沒有更多」（`has_more`），不能問「還剩幾筆」 |
-| **Dedup** | 被 `INSERT OR IGNORE` 擋掉的重複訊息不會推進 cursor（NEVER #7） |
+| Rule | Detail |
+|------|--------|
+| **Opaque** | A cursor is an opaque token. Echo it back verbatim; **do not parse it, compare it, or do arithmetic on it**. The encoding will change |
+| **Omitting `since`** | Returns the current head with an empty `events` array. This is how a new consumer starts tailing from now without replaying all history |
+| **`next_cursor`** | The position to pass back on the next call. With no new events it **holds position**, so an idle consumer never loses a valid cursor |
+| **`head_cursor`** | The current end of the log. If your stored cursor is ahead of head (SQLite was rebuilt or truncated), reset — otherwise you stall forever |
+| **Invalid cursor** | Returns `{ "error": "invalid_cursor", "detail": ... }` rather than silently returning nothing |
+| **Ordering** | Events are **ascending** in the order core accepted them, which is unrelated to `timestamp` order |
+| **Sparse** | The sequence **has gaps and is not contiguous**. Do not assume adjacency, and **do not subtract two cursors to estimate a backlog** — on a real store of 1644 messages the sequence had already reached 18744. Ask whether more is pending (`has_more`), never how much |
+| **Dedup** | A duplicate message rejected by `INSERT OR IGNORE` does not advance the cursor (NEVER #7) |
 
-**目前涵蓋範圍**：只有 `message` 事件會進 SQLite（見 `syncEventToSQLite`），所以只有這類被編號。將來持久化其他事件類型時，它們會加入**同一條**序列。
+**Current coverage:** only `message` events reach SQLite (see `syncEventToSQLite`), so
+only those are sequenced. When other event types get persisted they join **the same**
+sequence.
 
-**與 subscription 搭配使用**（見下方 Resource Subscription）：
+**Using it with subscription** (see Resource Subscription below):
 
 ```
-subscribe chat://chats  →  收到 notifications/resources/updated
-                        →  read_events({ since: 上次的 next_cursor })
-                        →  存下新的 next_cursor
+subscribe chat://chats  →  receive notifications/resources/updated
+                        →  read_events({ since: <your saved next_cursor> })
+                        →  save the new next_cursor
 ```
 
-subscription 只說「有變動」，read_events 說「變動是什麼」。兩者合起來才是完整的 push 管線。
+Subscription only says "something changed"; `read_events` says what changed. Together
+they form the complete push pipeline.
 
 ### `search_messages`
 
-全文搜尋訊息。使用 FTS5 + highlight snippet。
+Full-text search over messages, using FTS5 with highlighted snippets.
 
-**Input Schema**：
+**Input schema:**
 ```json
 {
   "type": "object",
@@ -212,7 +228,7 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 }
 ```
 
-**Output 範例**：
+**Example output:**
 ```json
 {
   "results": [
@@ -240,15 +256,17 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 }
 ```
 
-**FTS5 查詢邏輯**（依 Phase 2.1 結果）：
-- query 長度 ≥ 3 字元 → FTS5 trigram 查詢
-- query 長度 < 3 字元 → fallback LIKE 查詢（Phase 2.1 確定：trigram FTS5 + LIKE fallback for <3 char queries）
+**FTS5 query logic** (per the Phase 2.1 result):
+
+- Query length ≥ 3 characters → FTS5 trigram query.
+- Query length < 3 characters → LIKE fallback. Phase 2.1 settled on trigram FTS5 plus a
+  LIKE fallback for sub-3-character queries; see `storage-schema.md` for why.
 
 ### `send_message`
 
-發送訊息。經過 SafetyRail 檢查後轉發給對應 adapter。
+Sends a message, forwarded to the matching adapter after SafetyRail checks.
 
-**Input Schema**：
+**Input schema:**
 ```json
 {
   "type": "object",
@@ -260,7 +278,7 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 }
 ```
 
-**Output 範例**（成功）：
+**Example output** (success):
 ```json
 {
   "success": true,
@@ -269,7 +287,7 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 }
 ```
 
-**Output 範例**（SafetyRail 攔截）：
+**Example output** (blocked by SafetyRail):
 ```json
 {
   "success": false,
@@ -278,7 +296,7 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 }
 ```
 
-**Output 範例**（adapter 不可用）：
+**Example output** (adapter unavailable):
 ```json
 {
   "success": false,
@@ -289,9 +307,9 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 
 ### `get_status`
 
-取得系統狀態：adapter 連線狀態 + storage 統計。
+Returns system status: adapter connection state plus storage statistics.
 
-**Input Schema**：
+**Input schema:**
 ```json
 {
   "type": "object",
@@ -299,7 +317,7 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 }
 ```
 
-**Output 範例**：
+**Example output:**
 ```json
 {
   "adapters": {
@@ -322,33 +340,34 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 }
 ```
 
-`storage.cursor` 是當前 head cursor——consumer 可以直接拿去餵 `read_events({ since })` 開始跟。
+`storage.cursor` is the current head cursor — a consumer can feed it straight into
+`read_events({ since })` to start tailing.
 
 ## Resources
 
 ### `chat://chats`
 
-所有聊天列表（含最近訊息摘要）。
+Every chat, with a summary of its most recent message.
 
-**URI**：`chat://chats`
+**URI**: `chat://chats`
 
-**回傳格式**：同 `list_chats` tool 的 output（不帶分頁，回傳所有聊天）。
+**Response**: same shape as the `list_chats` tool output, unpaginated — all chats.
 
 ### `chat://chats/{id}/messages`
 
-特定聊天的最近訊息。
+Recent messages for one chat.
 
-**URI**：`chat://chats/line:c1234567890abcdef/messages?limit=20`
+**URI**: `chat://chats/line:c1234567890abcdef/messages?limit=20`
 
-**回傳格式**：同 `read_messages` tool 的 output（最近 N 筆，預設 20）。
+**Response**: same shape as the `read_messages` tool output (the latest N, default 20).
 
 ### `chat://chats/{id}/info`
 
-特定聊天的詳細資訊。
+Details for one chat.
 
-**URI**：`chat://chats/line:c1234567890abcdef/info`
+**URI**: `chat://chats/line:c1234567890abcdef/info`
 
-**回傳格式**：
+**Response:**
 ```json
 {
   "id": "line:c1234567890abcdef",
@@ -367,40 +386,45 @@ subscription 只說「有變動」，read_events 說「變動是什麼」。兩�
 
 ### `chat://status`
 
-系統狀態摘要。
+System status summary.
 
-**URI**：`chat://status`
+**URI**: `chat://status`
 
-**回傳格式**：同 `get_status` tool 的 output。
+**Response**: same shape as the `get_status` tool output.
 
-## Resource Subscription
+## Resource subscription
 
-### 機制
+### Mechanism
 
-MCP resource subscription 採 **notify-then-fetch** 模式：
+MCP resource subscription follows a **notify-then-fetch** model:
 
-1. Client（Claude Code）subscribe 特定 resource URI
-2. 有新訊息寫入 Storage 時，core MCP server 發送 `notifications/resources/updated` notification
-3. Client 收到 notification 後自行 fetch resource 取得最新資料
+1. The client (Claude Code, say) subscribes to a resource URI.
+2. When a new message is written to Storage, the core MCP server sends a `notifications/resources/updated` notification.
+3. On receiving it, the client fetches the resource itself to get the latest data.
 
-### 觸發流程
+### Trigger flow
 
 ```
-Adapter event notification → Core Storage 寫入
-  → 判斷 affected resources:
-    - 新訊息 → chat://chats (last_message 更新)
-                + chat://chats/{affected_chat_id}/messages
-    - 新聯絡人 → chat://chats/{affected_chat_id}/info
-    - 狀態變更 → chat://status
-  → 對每個 affected resource 發送 notifications/resources/updated
-  → Subscribed clients fetch 最新資料
+Adapter event notification → Core writes to Storage
+  → determine the affected resources:
+    - new message  → chat://chats (last_message changed)
+                     + chat://chats/{affected_chat_id}/messages
+    - new contact  → chat://chats/{affected_chat_id}/info
+    - state change → chat://status
+  → send notifications/resources/updated for each affected resource
+  → subscribed clients fetch the latest data
 ```
 
-### Dual-Track 策略
+### Dual-track strategy
 
-Resource subscription 是較新的 MCP feature，可能不是所有 client 都支援。chatmux 同時支援：
+Resource subscription is a relatively new MCP feature and may not be supported by every
+client, so chatmux supports both paths:
 
-1. **Subscription**（主要）：支援 subscription 的 client 會收到即時通知
-2. **Tool polling**（fallback）：client 可定期呼叫 `list_chats` 或 `read_messages` 取得最新資料
+1. **Subscription** (primary): clients that support it get real-time notifications.
+2. **Tool polling** (fallback): a client can call `list_chats` or `read_messages` on an interval.
 
-兩種方式回傳格式完全一致，client 可依自身能力選擇。
+Both return identical shapes, so a client can pick whichever matches its capabilities.
+
+For a consumer that must not miss events, neither path is sufficient on its own — use
+`read_events` with a persisted cursor, and treat subscription purely as a latency hint.
+`examples/notifier/` implements exactly that.

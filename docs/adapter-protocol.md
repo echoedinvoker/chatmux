@@ -1,22 +1,28 @@
 # Adapter Protocol
 
-> **Protocol Version**: 0.3
+> **Protocol version**: 0.3
 > **Validated against**: LINE (v0.1), Telegram (v0.2, v0.3)
-> **Changelog**: see bottom of document
+> **Changelog**: at the bottom of this document
 
-chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JSON-RPC 與 core daemon 通訊。Adapter 可以用任何語言實作，可以在 chatmux monorepo 內或獨立 repo。
+A chatmux adapter is a child process that talks to the core daemon over
+newline-delimited JSON-RPC on stdin/stdout. Adapters can be written in any language and
+can live inside the chatmux monorepo or in their own repository.
 
-## 傳輸層
+## Transport
 
-- **編碼**：UTF-8 JSON，每行一個完整 JSON object（newline `\n` 分隔）
-- **管道**：stdin（core → adapter）、stdout（adapter → core）
-- **stderr**：adapter 自由使用，core 轉錄到 daemon log
+- **Encoding**: UTF-8 JSON, one complete JSON object per line, separated by `\n`.
+- **Pipes**: stdin (core → adapter), stdout (adapter → core).
+- **stderr**: the adapter's to use freely; core relays it into the daemon log.
 
-> **非 Node.js adapter 注意**：Python、Go、Rust 等語言的 stdout 在 pipe 模式下預設**區塊緩衝**（不是行緩衝）。Adapter 必須確保每寫完一行 JSON 就 flush。Python 範例：`sys.stdout.reconfigure(line_buffering=True)`（模組頂層）。不解決此問題會導致 JSON-RPC response 卡在緩衝區、core readline 永遠收不到。
+> **Note for non-Node.js adapters**: in Python, Go, Rust and friends, stdout is
+> **block-buffered** by default when it is a pipe, not line-buffered. An adapter must
+> flush after writing each line of JSON. In Python, put
+> `sys.stdout.reconfigure(line_buffering=True)` at module top level. Skip this and your
+> JSON-RPC responses sit in the buffer while core's readline waits forever.
 
-## 訊息格式
+## Message formats
 
-### Request（Core → Adapter，預期 response）
+### Request (Core → Adapter, expects a response)
 
 ```json
 {
@@ -27,7 +33,7 @@ chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JS
 }
 ```
 
-### Response（Adapter → Core，回覆 request）
+### Response (Adapter → Core, answering a request)
 
 ```json
 {
@@ -37,7 +43,7 @@ chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JS
 }
 ```
 
-### Error Response
+### Error response
 
 ```json
 {
@@ -47,7 +53,7 @@ chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JS
 }
 ```
 
-### Notification（Adapter → Core，fire-and-forget）
+### Notification (Adapter → Core, fire-and-forget)
 
 ```json
 {
@@ -57,11 +63,12 @@ chatmux adapter 是 child process，透過 stdin/stdout 的 newline-delimited JS
 }
 ```
 
-Notification 沒有 `id` 欄位，core 不回覆。
+A notification has no `id` field, and core does not reply to it.
 
-## Adapter 配置
+## Adapter configuration
 
-Adapter 的啟動命令、工作目錄、環境變數由 `$CHATMUX_DATA_DIR/adapters.json` 配置：
+An adapter's launch command, working directory, and environment variables come from
+`$CHATMUX_DATA_DIR/adapters.json`:
 
 ```json
 {
@@ -87,24 +94,25 @@ Adapter 的啟動命令、工作目錄、環境變數由 `$CHATMUX_DATA_DIR/adap
 }
 ```
 
-| 欄位 | 必填 | 說明 |
-|------|------|------|
-| `platform` | 是 | 平台識別符，與 `initialize` response 的 platform 一致 |
-| `command` | 是 | 可執行檔路徑（外部 adapter 建議用**絕對路徑**，如 venv 的 python） |
-| `args` | 是 | 命令參數陣列 |
-| `cwd` | 否 | 工作目錄，預設為 adapter 檔案所在目錄 |
-| `env` | 否 | Per-adapter 環境變數，merge 進 subprocess env。用於 API key 等機密，避免全域 env 撞名 |
-| `enabled` | 是 | 是否啟用 |
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `platform` | Yes | Platform identifier; must match the `platform` in the `initialize` response |
+| `command` | Yes | Executable path. External adapters should use an **absolute path**, e.g. a venv's python |
+| `args` | Yes | Argument array |
+| `cwd` | No | Working directory; defaults to the directory containing the adapter |
+| `env` | No | Per-adapter environment variables, merged into the subprocess env. Use it for API keys and other secrets, avoiding collisions in the global env |
+| `enabled` | Yes | Whether to start this adapter |
 
-Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
+When the config file is absent, core falls back to its built-in defaults, which keeps
+v0.1 working.
 
-## Core → Adapter Requests
+## Core → Adapter requests
 
 ### `initialize`
 
-首次 spawn 後 core 送出，adapter 回報 capabilities。
+Sent right after the first spawn; the adapter reports its capabilities.
 
-**Request params**：
+**Request params:**
 ```json
 {
   "data_dir": "/home/user/.local/share/chatmux",
@@ -112,9 +120,12 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-`data_dir` 是 chatmux 的頂層資料目錄。Adapter 應在 `{data_dir}/adapters/{platform}/` 下建立自己的子目錄，存放 session 檔、cache 等平台特有資料。例如 Telegram adapter 把 session 檔存在 `{data_dir}/adapters/telegram/chatmux.session`。
+`data_dir` is chatmux's top-level data directory. An adapter should create its own
+subdirectory at `{data_dir}/adapters/{platform}/` for session files, caches, and other
+platform-specific data. The Telegram adapter, for instance, keeps its session at
+`{data_dir}/adapters/telegram/chatmux.session`.
 
-**Response result**：
+**Response result:**
 ```json
 {
   "platform": "line",
@@ -127,15 +138,22 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-`platform_rate_limits` 是選填。回報後 core SafetyRail 取嚴者（core 預設 vs adapter 回報）。**Adapter 只能更嚴，不能放寬**——core 底線是安全網。
+`platform_rate_limits` is optional. When reported, core's SafetyRail takes whichever is
+stricter — its own default or the adapter's value. **An adapter can only tighten, never
+loosen**; the core floor is the safety net.
 
 ### `get_contacts`
 
-取得平台定義的聯絡人。不同平台的聯絡人範圍差異很大——LINE 有明確的好友列表，Telegram 只回傳手機通訊錄中的聯絡人（可能為空）。Core 用聯絡人做 display_name 查詢，但不依賴聯絡人列表的完整性——backfill/live event 中的 sender 資訊由 adapter 自行解析（如 Telegram 用 `msg.get_sender()` 查 entity cache）。
+Returns contacts as the platform defines them. That scope varies a lot: LINE has an
+explicit friend list, while Telegram returns only contacts from your phone's address book
+and may return none at all. Core uses contacts for `display_name` lookups but does not
+depend on the list being complete — sender information on backfill and live events is
+resolved by the adapter itself (Telegram, for example, uses `msg.get_sender()` against
+its entity cache).
 
-**Request params**：`{}`
+**Request params**: `{}`
 
-**Response result**：
+**Response result:**
 ```json
 {
   "contacts": [
@@ -149,15 +167,15 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-`raw` 是選填，保留平台原始資料供 debug。
+`raw` is optional and preserves the platform's original payload for debugging.
 
 ### `get_chats`
 
-取得聊天列表（群組 + DM）。
+Returns the chat list: groups and DMs.
 
-**Request params**：`{}`
+**Request params**: `{}`
 
-**Response result**：
+**Response result:**
 ```json
 {
   "chats": [
@@ -177,30 +195,45 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-`type`：`"direct"` | `"group"` | `"room"`
+`type` is one of `"direct"`, `"group"`, `"room"`.
 
-`raw` 是選填。DM 的 `name` 取自 contacts map 或 adapter 自行解析。未知 DM 的 name 為 null。
+`raw` is optional. A DM's `name` comes from the contacts map or from the adapter's own
+resolution; an unknown DM has a null name.
 
-**`last_message_at`（optional，v0.3 起）**：該對話最後一則訊息的時間（ms epoch）。
+**`last_message_at`** (optional, since v0.3): the timestamp of the chat's most recent
+message, in epoch milliseconds.
 
-這是 core 冷啟動 backfill 的**排序訊號**——core 按 `last_message_at DESC` 排序後，在全域預算（500 則）內從最活躍的對話開始回填。強烈建議提供：
+This is core's **ordering signal for cold-start backfill** — core sorts by
+`last_message_at DESC` and spends its global budget of 500 messages starting from the most
+active conversations. Providing it is strongly recommended:
 
-- **有提供** → 冷啟動預算花在最近有動靜的對話上
-- **未提供**（全部 null）→ 排序退化成任意順序，預算可能全花在冷對話上。功能不會壞，但冷啟動品質顯著下降
+- **Provided** → the cold-start budget goes to conversations with recent activity.
+- **Omitted** (all null) → ordering degrades to arbitrary, and the budget may be spent
+  entirely on dormant chats. Nothing breaks, but cold-start quality drops noticeably.
 
-多數平台的 dialogs/conversations API 已直接帶這個欄位（Telegram `dialog.date`），成本近乎零。core 對已有值採 `MAX()` 保護，回 null 不會覆寫既有值。
+Most platforms' dialogs/conversations APIs already carry this field (Telegram's
+`dialog.date`), so the cost is near zero. Core guards existing values with `MAX()`, so
+returning null never overwrites what is already stored.
 
-### `get_message_boxes`（optional）
+### `get_message_boxes` (optional)
 
-> **v0.2 起為 optional**。若 adapter 不支援，回 JSON-RPC error `-32601` (Method not found)。core **只看 `error.code`**（不比對 message 文字，措辭隨你），跳過此步驟，改用 `get_chats` 回傳的 `last_message_at` 做 backfill 排序。
+> **Optional since v0.2.** An adapter that does not support it replies with JSON-RPC error
+> `-32601` (Method not found). Core **looks only at `error.code`** — it never matches on
+> the message text, so word it however you like — then skips this step and uses
+> `last_message_at` from `get_chats` for backfill ordering instead.
 >
-> ⚠️ **不實作此方法的 adapter 應在 `get_chats` 提供 `last_message_at`**——否則 core 沒有任何排序訊號，冷啟動 backfill 預算會花在隨機對話上（v0.2 曾承諾此 fallback 但沒有欄位可用，v0.3 補上）。
+> ⚠️ **An adapter that does not implement this method should provide `last_message_at` in
+> `get_chats`.** Otherwise core has no ordering signal at all and the cold-start backfill
+> budget goes to arbitrary conversations. (v0.2 promised this fallback without providing a
+> field it could use; v0.3 closed that gap.)
 
-取得所有有訊息的對話清單，用於冷啟動 backfill 發現。此方法源自 LINE 的 messageBoxes API，其他平台的 dialogs/conversations API 通常已由 `get_chats` 涵蓋。
+Returns every conversation that has messages, used for cold-start backfill discovery. The
+method originates in LINE's messageBoxes API; on other platforms the dialogs/conversations
+API is usually already covered by `get_chats`.
 
-**Request params**：`{}`
+**Request params**: `{}`
 
-**Response result**（raw array，非 object 包裝）：
+**Response result** (a raw array, not wrapped in an object):
 ```json
 [
   {
@@ -212,9 +245,10 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 
 ### `send_message`
 
-透過平台發送訊息。Core 在轉發前已通過 SafetyRail 檢查。
+Sends a message through the platform. Core has already run SafetyRail checks before
+forwarding.
 
-**Request params**：
+**Request params:**
 ```json
 {
   "chat_id": "c1234567890abcdef",
@@ -225,9 +259,11 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-`chat_id` 是 raw `platform_id`（不帶 `platform:` 前綴）。Core 負責路由（從 composite ID 提取 platform 和 platform_id），adapter 收到的永遠是 bare platform_id。
+`chat_id` is the raw `platform_id`, without a `platform:` prefix. Core handles routing —
+extracting platform and platform_id from the composite ID — so an adapter always receives
+a bare platform_id.
 
-**Response result**（成功）：
+**Response result** (success):
 ```json
 {
   "message_id": "m9876543210",
@@ -235,7 +271,7 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-**Error**（失敗）：
+**Error** (failure):
 ```json
 {
   "code": -32001,
@@ -245,9 +281,10 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 
 ### `backfill`
 
-取回歷史訊息。Core 指定 chat、時間點、數量，adapter 負責分頁取回。
+Fetches history. Core specifies the chat, the point in time, and how many; the adapter
+handles pagination.
 
-**Request params**：
+**Request params:**
 ```json
 {
   "chat_id": "c1234567890abcdef",
@@ -256,9 +293,9 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-`chat_id` 是 raw `platform_id`（不帶前綴），同 `send_message`。
+`chat_id` is the raw `platform_id` without a prefix, as in `send_message`.
 
-**Response result**：
+**Response result:**
 ```json
 {
   "events": [ ... ],
@@ -267,33 +304,41 @@ Config 不存在時 → core 退回內建預設（向後相容 v0.1）。
 }
 ```
 
-`events` 內容格式同 `event` notification 的 params。`has_more` 為 false 表示該 chat 已見底。
+Each entry in `events` has the same shape as an `event` notification's params.
+`has_more: false` means that chat has been exhausted.
 
-**冷啟動流程**（core 側邏輯）：
-1. 取 chats 列表，按 last_message_time 降序排列
-2. 逐 chat 呼叫 backfill，每輪 count=50
-3. 全域計數器累加，達 500 即停（不等遍歷完所有 chat）
-4. 若首輪未達 500 且仍有 chat 未見底則再輪，直到全域 ≥ 500 或所有 chat 見底
+**Cold-start procedure** (core-side logic):
 
-**Backfill × live event 交錯**：backfill 和 live push event 可能產生相同 message_id 的 event。Core 的 Storage 以 INSERT OR IGNORE（UNIQUE constraint on platform + platform_message_id）處理 dedup。Adapter 不需要處理——dedup 是 core 的責任。
+1. Take the chat list and sort by last message time, descending.
+2. Call backfill per chat, `count=50` per round.
+3. Accumulate into a global counter and stop at 500 — without necessarily visiting every chat.
+4. If the first pass stayed under 500 and chats remain unexhausted, run another round, until the global count reaches 500 or every chat is exhausted.
+
+**Backfill interleaving with live events**: backfill and live push can produce events with
+the same message ID. Core's Storage deduplicates with `INSERT OR IGNORE` against a UNIQUE
+constraint on (platform, platform_message_id). Adapters do not need to handle this — dedup
+is core's responsibility.
 
 ### `shutdown`
 
-優雅關閉。Adapter 收到後應斷開平台連線、清理資源、exit 0。
+Graceful shutdown. On receiving it the adapter should disconnect from the platform, clean
+up, and exit 0.
 
-**Request params**：`{}`
+**Request params**: `{}`
 
-**Response result**：`{}`
+**Response result**: `{}`
 
-Core 送出 shutdown 後等最多 5 秒。超時則 SIGTERM → 再等 3 秒 → SIGKILL。
+Core waits up to 5 seconds after sending shutdown. On timeout it sends SIGTERM, waits
+another 3 seconds, then SIGKILL.
 
-## Adapter → Core Notifications
+## Adapter → Core notifications
 
 ### `event`
 
-平台事件。最核心的 notification——新訊息、已讀、撤回都走這裡。
+A platform event. This is the central notification — new messages, read receipts, and
+unsends all travel through it.
 
-**Params**：
+**Params:**
 ```json
 {
   "type": "message",
@@ -317,26 +362,30 @@ Core 送出 shutdown 後等最多 5 秒。超時則 SIGTERM → 再等 3 秒 →
 }
 ```
 
-`raw` 是選填——保留平台原始資料供 debug，core 不解析但會存到 JSONL。若平台原始物件無法直接 JSON 序列化（如 Telethon 的 Message 含 circular reference），可省略或萃取可序列化子集。
+`raw` is optional. It preserves the platform's original payload for debugging; core does
+not parse it but does store it in JSONL. When the platform object cannot be serialized
+directly — Telethon's `Message` contains circular references, for instance — omit it or
+extract a serializable subset.
 
-#### Event Type Enum
+#### Event type enum
 
-| type | 說明 | content 結構 |
-|------|------|-------------|
-| `message` | 新訊息 | `{ type: "text"\|"image"\|"video"\|"audio"\|"sticker"\|"file", text?, media_url?, sticker_id?, file_name? }` |
-| `read_receipt` | 已讀（v0.2 defer：語義因平台而異，adapter 視能力決定是否支援） | `{ chat_id, read_up_to: timestamp }` |
-| `unsend` | 撤回訊息 | `{ message_id }` |
+| type | Meaning | `content` shape |
+|------|---------|-----------------|
+| `message` | A new message | `{ type: "text"\|"image"\|"video"\|"audio"\|"sticker"\|"file", text?, media_url?, sticker_id?, file_name? }` |
+| `read_receipt` | Read receipt (deferred in v0.2: semantics differ per platform, so support is at the adapter's discretion) | `{ chat_id, read_up_to: timestamp }` |
+| `unsend` | A retracted message | `{ message_id }` |
 
-**`unsend` 注意事項**：
-- `timestamp` 可為 0 或 null——部分平台（如 Telegram）的刪除事件不提供撤回時間，core 應容忍。
-- 若平台一次刪除多則訊息（如 Telegram 的 `MessageDeleted` 帶多個 ID），adapter 應對每個被刪訊息各發一個 unsend notification。
-- 部分平台（如 Telegram 私聊）的刪除事件不帶 `chat_id`，adapter 應跳過這些事件並在 stderr log 警告。
+**Notes on `unsend`:**
+
+- `timestamp` may be 0 or null — some platforms, Telegram included, do not report when the deletion happened. Core tolerates this.
+- If a platform deletes several messages at once (Telegram's `MessageDeleted` carries multiple IDs), the adapter should emit one unsend notification per deleted message.
+- Some platforms omit `chat_id` on deletions in private chats. The adapter should skip those events and log a warning to stderr.
 
 ### `status`
 
-Adapter 連線狀態變更。
+A change in adapter connection state.
 
-**Params**：
+**Params:**
 ```json
 {
   "state": "connected",
@@ -344,13 +393,14 @@ Adapter 連線狀態變更。
 }
 ```
 
-`state`：`"connecting"` | `"connected"` | `"reconnecting"` | `"disconnected"` | `"auth_required"`
+`state` is one of `"connecting"`, `"connected"`, `"reconnecting"`, `"disconnected"`,
+`"auth_required"`.
 
 ### `error`
 
-Adapter 內部錯誤。
+An internal adapter error.
 
-**Params**：
+**Params:**
 ```json
 {
   "severity": "warning",
@@ -359,20 +409,20 @@ Adapter 內部錯誤。
 }
 ```
 
-`severity`：`"info"` | `"warning"` | `"error"` | `"fatal"`
+`severity` is one of `"info"`, `"warning"`, `"error"`, `"fatal"`.
 
-`"fatal"` 表示 adapter 即將 exit。
+`"fatal"` means the adapter is about to exit.
 
-## Adapter 生命週期
+## Adapter lifecycle
 
 ```
-Core spawn adapter process
+Core spawns the adapter process
   │
   ├─ Core sends: initialize { data_dir, platform }
   │   └─ Adapter responds: { capabilities, platform_rate_limits }
   │
-  ├─ Core waits for adapter status: "connected" notification
-  │   └─ Timeout: 120s
+  ├─ Core waits for an adapter status: "connected" notification
+  │   └─ Timeout: 120 s
   │
   ├─ Core sends: get_contacts {}
   │   └─ Adapter responds: { contacts: [...] }
@@ -380,7 +430,7 @@ Core spawn adapter process
   ├─ Core sends: get_chats {}
   │   └─ Adapter responds: { chats: [...] }
   │
-  ├─ Core sends: get_message_boxes {} (optional, skip on -32601)
+  ├─ Core sends: get_message_boxes {} (optional, skipped on -32601)
   │   └─ Adapter responds: [ { id, lastDeliveredTime } ] or error -32601
   │
   ├─ Core sends: backfill { chat_id, before_timestamp, count }  (repeated per chat)
@@ -397,87 +447,90 @@ Core spawn adapter process
   │
   └─ [Crash recovery]
       ├─ Adapter exits non-zero
-      ├─ Adapter Runner ErrorTracker: backoff 5→10→20s
+      ├─ Adapter Runner ErrorTracker: backoff 5 → 10 → 20 s
       ├─ Restart with backoff
-      └─ KillSwitch at 5 consecutive crashes → stop restart attempts
+      └─ KillSwitch at 5 consecutive crashes → stop attempting restarts
 ```
 
-## Auth 策略
+## Auth strategies
 
-不同平台的首次認證方式差異很大：
+First-time authentication differs sharply between platforms:
 
-| 策略 | 說明 | 範例 |
-|------|------|------|
-| **stdin 互動** | Adapter 在 daemon spawn 模式下透過 stdin 與使用者互動（QR 碼、authToken） | LINE adapter |
-| **獨立登入流程** | 首次 auth 需要獨立執行（如 `python main.py --auth`），產出 session/token 檔。後續 daemon spawn 用 session 檔自動重連 | Telegram adapter（`--auth` 模式） |
-| **API token** | 透過 `adapters.json` 的 `env` 欄位注入 API token，不需互動登入 | Bot-based adapter |
+| Strategy | How it works | Example |
+|----------|--------------|---------|
+| **Interactive stdin** | The adapter interacts with the user over stdin while daemon-spawned (QR code, authToken) | LINE adapter |
+| **Separate login flow** | First auth runs on its own, e.g. `python main.py --auth`, producing a session or token file. Later daemon spawns reconnect automatically using it | Telegram adapter (`--auth` mode) |
+| **API token** | An API token is injected through `adapters.json`'s `env` field; no interactive login | Bot-based adapters |
 
-Adapter 應在 README 中記載其 auth 流程。若採用「獨立登入流程」策略，`--auth` 模式下的 `data_dir` 應讀 `CHATMUX_DATA_DIR` 環境變數（或預設 `~/.local/share/chatmux`），確保與 daemon spawn 路徑用同一個 session 檔位置。
+An adapter should document its auth flow in its README. If it uses the separate-login
+strategy, its `--auth` mode should read `data_dir` from the `CHATMUX_DATA_DIR` environment
+variable (defaulting to `~/.local/share/chatmux`) so it writes the session file to the same
+place the daemon-spawned process will look.
 
-## 如何寫一個新 Adapter
+## Writing a new adapter
 
-### 最小實作
+### Minimum implementation
 
-一個合法的 adapter 是任意語言的獨立程式，只需要：
+A valid adapter is a standalone program in any language that only needs to:
 
-1. **讀 stdin、寫 stdout**：newline-delimited JSON-RPC（注意非 Node.js 語言的 stdout 緩衝問題——見§傳輸層）
-2. **處理 `initialize` request**：回報 capabilities
-3. **處理 `shutdown` request**：優雅退出
-4. **發送 `event` notification**：把平台事件轉成統一格式
+1. **Read stdin and write stdout** as newline-delimited JSON-RPC — mind the stdout buffering issue in non-Node.js languages, see [Transport](#transport).
+2. **Handle the `initialize` request** by reporting capabilities.
+3. **Handle the `shutdown` request** by exiting cleanly.
+4. **Send `event` notifications** translating platform events into the common format.
 
-### 步驟
+### Steps
 
-1. 建立獨立 repo 或 monorepo 子目錄，任意語言的入口程式
-2. 實作 stdin JSON-RPC reader + stdout writer（確保 stdout 行緩衝）
-3. 實作 `initialize` handler，回報：
-   - `supported_events`：支援的 event type subset
-   - `can_send`：是否支援發送
-   - `can_backfill`：是否支援歷史拉取
-   - `platform_rate_limits`（選填）：平台特有的 rate limit
-4. 連接平台，收到事件後發 `event` notification
-5. 若 `can_send: true`，實作 `send_message` handler
-6. 若 `can_backfill: true`，實作 `backfill` handler
-7. 在 `$CHATMUX_DATA_DIR/adapters.json` 中註冊 adapter 的啟動命令和環境變數
+1. Create a standalone repo or a monorepo subdirectory with an entry point in your language of choice.
+2. Implement a stdin JSON-RPC reader and stdout writer, making sure stdout is line-buffered.
+3. Implement the `initialize` handler, reporting:
+   - `supported_events` — the subset of event types you support
+   - `can_send` — whether sending is supported
+   - `can_backfill` — whether history fetching is supported
+   - `platform_rate_limits` (optional) — platform-specific rate limits
+4. Connect to the platform and emit an `event` notification for each event received.
+5. If `can_send: true`, implement the `send_message` handler.
+6. If `can_backfill: true`, implement the `backfill` handler.
+7. Register the adapter's launch command and environment in `$CHATMUX_DATA_DIR/adapters.json`.
 
-### 注意事項
+### Rules
 
-- Adapter 可以是 monorepo 內的 TypeScript/Node、獨立 repo 的 Python、或任何語言——只要能讀寫 stdin/stdout JSON-RPC
-- Adapter **不可以**直接讀寫 Storage（JSONL/SQLite）——只能透過 stdio 跟 core 通訊
-- Adapter **不可以**放寬 rate limit——只能回報更嚴的限制
-- `raw` 欄位選填，放平台原始資料供 debug。無法 JSON 序列化時可省略
-- Core → adapter 的 `chat_id` 一律是 raw `platform_id`（不帶 `platform:` 前綴），adapter 不需要自行剝除前綴
-- Adapter 應在 `{data_dir}/adapters/{platform}/` 下建子目錄存放 session 檔等平台資料
-- Adapter crash 由 core 的 Adapter Runner 自動重啟（有 backoff），不需要自己處理
-- 外部 adapter 的環境變數（API key 等）透過 `adapters.json` 的 `env` 欄位注入
+- An adapter can be TypeScript/Node inside the monorepo, Python in its own repo, or anything else — the only requirement is reading and writing JSON-RPC over stdin/stdout.
+- An adapter **must not** touch Storage (JSONL/SQLite) directly. stdio to core is the only channel.
+- An adapter **must not** loosen a rate limit. It can only report a stricter one.
+- The `raw` field is optional; put the platform's original payload there for debugging, and omit it when it cannot be JSON-serialized.
+- `chat_id` from core is always the raw `platform_id` with no `platform:` prefix — the adapter never has to strip anything.
+- Keep session files and other platform data under `{data_dir}/adapters/{platform}/`.
+- Adapter crashes are restarted automatically by core's Adapter Runner, with backoff. Do not implement your own restart logic.
+- External adapters receive secrets such as API keys through the `env` field in `adapters.json`.
 
 ---
 
 ## Changelog
 
-### v0.3（optional 方法真閉環）
+### v0.3 — optional methods actually close the loop
 
-Additive、非 breaking——v0.2 adapter 不改也能跑。
+Additive and non-breaking; a v0.2 adapter runs unchanged.
 
-| 改動 | Gap ID | 說明 |
-|------|--------|------|
-| §get_chats 新增 optional `last_message_at` | G1 | v0.2 承諾「用 get_chats 做 backfill 排序」但 response schema 沒有任何時間欄位，fallback 照著做不出來。補上排序訊號，讓 `get_message_boxes` optional 真的成立 |
-| §get_message_boxes 明示偵測靠 `error.code` | G1 | core 改讀 JSON-RPC `error.code`，不再比對 message 文字。第三方 adapter 換措辭不會被當硬失敗 |
-| Telegram 移除 `get_message_boxes` | G1, G-new-11 | 原本是 `get_dialogs()` 的第二份包裝（與自己的 `get_chats` 同源）。刪掉讓 optional fallback 路徑真的被壓測過 |
-| 移除 `contactName ? "direct" : "group"` 推斷 | G-new-8 | `type` 由 `get_chats` 權威提供，不再靠 contact cache 猜。`chats.type` 是 `NOT NULL CHECK`、沒有誠實的值可填，所以未被 `get_chats` 回報的 message box 一律跳過並 WARN，不發明 type。contacts 稀疏或抓取失敗的平台（Telegram 的 contacts 表實測為空）不會把私聊誤歸為 group |
+| Change | Gap ID | Rationale |
+|--------|--------|-----------|
+| Added optional `last_message_at` to §get_chats | G1 | v0.2 promised "use get_chats for backfill ordering" while its response schema had no time field at all, so the fallback could not actually be implemented. Adding the ordering signal is what makes `get_message_boxes` genuinely optional |
+| §get_message_boxes detection is explicitly by `error.code` | G1 | Core now reads the JSON-RPC `error.code` rather than matching message text, so a third-party adapter rewording its error is no longer treated as a hard failure |
+| Telegram dropped `get_message_boxes` | G1, G-new-11 | It was a second wrapper around `get_dialogs()`, the same source as its own `get_chats`. Removing it forces the optional fallback path to be exercised for real |
+| Removed the `contactName ? "direct" : "group"` inference | G-new-8 | `type` is authoritatively supplied by `get_chats` and is no longer guessed from the contact cache. `chats.type` is `NOT NULL CHECK` with no honest value to fall back on, so a message box that `get_chats` did not report is skipped with a WARN rather than having its type invented. Platforms with sparse or failed contact fetches — Telegram's contacts table measured empty — no longer misclassify DMs as groups |
 
-### v0.2（Telegram adapter 驗證後泛化）
+### v0.2 — generalized after validating against Telegram
 
-| 改動 | Gap ID | 說明 |
-|------|--------|------|
-| 新增 §Adapter 配置 | G-new-3 | 記載 adapters.json 格式與 env 欄位 |
-| §傳輸層加 stdout 緩衝提醒 | G-new-2 | 非 Node.js adapter 必讀 |
-| §initialize 修正 data_dir 說明 | G7 | 記載子目錄慣例 `{data_dir}/adapters/{platform}/` |
-| §get_contacts 措辭修正 | G-new-5 | 「所有可見聯絡人」→「平台定義的聯絡人」，承認跨平台差異 |
-| §get_message_boxes 改為 optional | G1, G-new-11 | 非 LINE 平台的 dialogs API 通常已由 get_chats 涵蓋；response 格式改為實際的 raw array |
-| §send_message chat_id 說明 | G-new-12, G-new-6 | 明確 chat_id 是 raw platform_id（無前綴）；core 負責路由和剝除前綴 |
-| §backfill chat_id 說明 | G-new-12 | 同上 |
-| `raw` 欄位標為選填 | G-new-9 | 無法 JSON 序列化時可省略 |
-| §Event unsend 注意事項 | G-new-10, G5, G8 | timestamp 可為 0；多 ID 拆成多 notification；缺 chat_id 跳過 |
-| 新增 §Auth 策略 | G-new-1 | 記載 stdin 互動 / 獨立登入 / API token 三種模式 |
-| §如何寫一個新 Adapter 重寫 | G6 | 移除 monorepo 假設，改為「任意語言的獨立程式」 |
-| read_receipt 加 defer 標記 | G3 | 語義因平台而異，v0.2 暫不強制 |
+| Change | Gap ID | Rationale |
+|--------|--------|-----------|
+| Added §Adapter configuration | G-new-3 | Documents the adapters.json format and the env field |
+| Added the stdout buffering note to §Transport | G-new-2 | Required reading for non-Node.js adapters |
+| Corrected the `data_dir` description in §initialize | G7 | Documents the `{data_dir}/adapters/{platform}/` subdirectory convention |
+| Reworded §get_contacts | G-new-5 | "all visible contacts" → "contacts as the platform defines them", acknowledging cross-platform differences |
+| Made §get_message_boxes optional | G1, G-new-11 | On non-LINE platforms the dialogs API is usually already covered by get_chats; the documented response shape was corrected to the actual raw array |
+| Clarified `chat_id` in §send_message | G-new-12, G-new-6 | It is the raw platform_id with no prefix; core owns routing and prefix stripping |
+| Clarified `chat_id` in §backfill | G-new-12 | Same as above |
+| Marked the `raw` field optional | G-new-9 | May be omitted when it cannot be JSON-serialized |
+| Added §Event unsend notes | G-new-10, G5, G8 | timestamp may be 0; multiple IDs split into multiple notifications; events without chat_id are skipped |
+| Added §Auth strategies | G-new-1 | Documents the interactive-stdin, separate-login, and API-token modes |
+| Rewrote §Writing a new adapter | G6 | Dropped the monorepo assumption in favor of "a standalone program in any language" |
+| Marked read_receipt as deferred | G3 | Semantics differ per platform; not mandated in v0.2 |
