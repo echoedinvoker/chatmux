@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { listChats, getMessages, searchMessages, getStatus, getEventsSince, getHeadSeq, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
 import type { SafetyRail } from "../safety.js";
+import type { JsonlEvent } from "../storage/jsonl.js";
 
 interface ChatOutput {
   id: string;
@@ -304,10 +305,17 @@ export function handleSearchMessages(
   return { results, total, limit, offset };
 }
 
+// sender 身分在 daemon 的 selfByPlatform、chat.type 在 DB —— 兩者 tools.ts 都拿不到，
+// 所以 draft 是 JsonlEvent 的窄化版本，由 daemon 端補完再交給 landEvent。
+export type OutgoingDraft = Omit<JsonlEvent, "chat" | "sender" | "received_at"> & {
+  chat: { platform_id: string };
+};
+
 export interface SendDeps {
   safetyRail: SafetyRail;
   sendToAdapter: (method: string, params: unknown) => Promise<unknown>;
   isAdapterConnected: () => boolean;
+  recordOutgoing?: (draft: OutgoingDraft) => void;
 }
 
 interface SendResult {
@@ -343,6 +351,30 @@ export async function handleSendMessage(
     }) as { message_id?: string; timestamp?: number };
 
     deps.safetyRail.recordSuccess();
+
+    // 落地失敗不可讓 send 回報失敗——訊息已經送到平台了，回 success:false 會讓 consumer 重送。
+    if (deps.recordOutgoing) {
+      if (!result.message_id) {
+        // 不可捏造 sentinel id：platform_message_id 是 SQLite UNIQUE 與去重鍵。
+        console.error("[tools] send succeeded but adapter returned no message_id; not landing");
+      } else {
+        try {
+          const [platform] = params.chat_id.split(":");
+          deps.recordOutgoing({
+            type: "message",
+            platform: platform ?? "",
+            platform_message_id: result.message_id,
+            chat: { platform_id: rawPlatformId },
+            timestamp: result.timestamp ?? Date.now(),
+            content: { type: "text", text: params.text },
+            raw: { outgoing: true },
+            source: "live",
+          });
+        } catch (err) {
+          console.error("[tools] recordOutgoing failed:", err);
+        }
+      }
+    }
 
     return {
       success: true,

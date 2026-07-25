@@ -8,6 +8,7 @@ import { z } from "zod";
 import { JsonlWriter, type JsonlEvent } from "./storage/jsonl.js";
 import { initSchema, syncEventToSQLite } from "./storage/sqlite.js";
 import { initFTS } from "./storage/fts.js";
+import { makeLandEvent } from "./storage/land-event.js";
 import { SafetyRail } from "./safety.js";
 import { isMethodNotFound, type SpawnResult } from "./adapter-runner.js";
 import { AdapterManager } from "./adapter-manager.js";
@@ -54,6 +55,12 @@ syncCheck();
 const safety = new SafetyRail();
 const subscriptions = new ResourceSubscriptionManager();
 
+const landEvent = makeLandEvent({
+  jsonl,
+  syncToSQLite: (event) => syncEventToSQLite(db, event),
+  subscriptions,
+});
+
 const adapterConfigs = loadAdapterConfigs(dataDir);
 console.error(`[daemon] loaded ${adapterConfigs.length} adapter config(s): ${adapterConfigs.map(c => c.platform).join(", ")}`);
 
@@ -93,13 +100,11 @@ manager.onEvent(async (platform: string, params: unknown) => {
   }
 
   try {
-    jsonl.append(event);
-    syncEventToSQLite(db, event);
-
-    const chatCompositeId = `${event.platform}:${event.chat.platform_id}`;
-    subscriptions.notifyMessageReceived(chatCompositeId);
-
-    console.error(`[daemon] [${platform}] event: ${event.content.type} from ${event.sender.display_name}`);
+    if (landEvent(event)) {
+      console.error(`[daemon] [${platform}] event: ${event.content.type} from ${event.sender.display_name}`);
+    } else {
+      console.error(`[daemon] [${platform}] deduped echo: ${event.platform_message_id}`);
+    }
   } catch (err) {
     console.error(`[daemon] [${platform}] event processing error:`, err);
   }
@@ -187,6 +192,36 @@ function registerTools(server: McpServer): void {
         safetyRail: safety,
         sendToAdapter: (method, params) => manager.sendRequest(platform, method, params),
         isAdapterConnected: () => manager.isConnected(platform),
+        recordOutgoing: (draft) => {
+          const self = selfByPlatform.get(draft.platform);
+          if (!self) {
+            console.error(`[daemon] WARN: no self identity for ${draft.platform}; using sentinel`);
+          }
+          const chatType = db.query<{ type: string }, [string, string]>(
+            "SELECT type FROM chats WHERE platform = ? AND platform_id = ?"
+          ).get(draft.platform, draft.chat.platform_id)?.type;
+          if (!chatType) {
+            console.error(`[daemon] WARN: chat type unknown for ${draft.platform}:${draft.chat.platform_id}; defaulting to direct`);
+          }
+
+          const event: JsonlEvent = {
+            ...draft,
+            chat: { platform_id: draft.chat.platform_id, type: chatType ?? "direct" },
+            sender: {
+              platform_id: self?.platform_id ?? "self",
+              display_name: self?.display_name || "我",
+            },
+            received_at: Date.now(),
+          };
+
+          try {
+            if (!landEvent(event)) {
+              console.error(`[daemon] [${draft.platform}] outgoing already landed via echo: ${draft.platform_message_id}`);
+            }
+          } catch (err) {
+            console.error(`[daemon] [${draft.platform}] outgoing landing failed:`, err);
+          }
+        },
       };
       const result = await handleSendMessage(deps, { chat_id, text });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
