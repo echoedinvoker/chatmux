@@ -102,10 +102,39 @@ describe("list_chats tool", () => {
     expect(result2.chats[0].id).not.toBe(result.chats[0].id);
   });
 
-  test("orders by last_message_at DESC", () => {
+  test("orders by last_activity_at DESC", () => {
     const result = handleListChats(db, {});
     expect(result.chats[0].name).toBe("工作群組");
     expect(result.chats[1].name).toBe("Alice");
+  });
+
+  test("last_message timestamp and text come from the same landed message", () => {
+    // F21 核心症狀：adapter 自報 7/25 有動靜，但 core 只落地到 7/13 那則
+    const jul13 = 1752364800000;
+    const jul25 = 1753401600000;
+    db.query("UPDATE chats SET last_activity_at = ? WHERE platform_id = ?").run(jul25, "c_alice");
+    db.query("UPDATE chats SET last_message_at = ? WHERE platform_id = ?").run(jul13, "c_alice");
+    db.query("UPDATE messages SET timestamp = ? WHERE platform_message_id = ?").run(jul13, "m1");
+
+    const alice = handleListChats(db, { search: "Alice" }).chats[0];
+    expect(alice.last_message.timestamp).toBe(jul13);
+    expect(alice.last_message.text).toBe("你好！");
+  });
+
+  test("list_chats and chat info report the same last_message_at", () => {
+    const jul13 = 1752364800000;
+    const jul25 = 1753401600000;
+    db.query("UPDATE chats SET last_activity_at = ? WHERE platform_id = ?").run(jul25, "c_alice");
+    db.query("UPDATE chats SET last_message_at = ? WHERE platform_id = ?").run(jul13, "c_alice");
+    db.query("UPDATE messages SET timestamp = ? WHERE platform_message_id = ?").run(jul13, "m1");
+
+    const fromTool = handleListChats(db, { search: "Alice" }).chats[0];
+    const fromResource = JSON.parse(
+      handleResource(db, "chat://chats/line:c_alice/info", {} as any)!
+    );
+
+    expect(fromResource.last_message_at).toBe(fromTool.last_message.timestamp);
+    expect(fromResource.last_activity_at).toBe(jul25);
   });
 });
 

@@ -233,4 +233,16 @@ describe("all read paths agree about a retracted message", () => {
     expect(chat.last_message!.text).toBeNull();
     expect(chat.last_message!.timestamp).toBe(1_700_000_001_000);
   });
+
+  test("a retracted newest message still counts toward last_message_at (R7)", () => {
+    syncEventToSQLite(db, unsendEvent("702", 1_700_000_005_000));
+    const row = db.query<{ last_message_at: number | null; last_activity_at: number | null }, []>(
+      "SELECT last_message_at, last_activity_at FROM chats LIMIT 1"
+    ).get()!;
+
+    // tombstone 是留在 messages 裡的一列（content_text = NULL, retracted_at 有值），
+    // 所以它計入 MAX(m.timestamp)——使用者點進去看得到它。
+    expect(row.last_message_at).toBe(1_700_000_001_000);
+    expect(row.last_activity_at).toBeGreaterThanOrEqual(row.last_message_at!);
+  });
 });

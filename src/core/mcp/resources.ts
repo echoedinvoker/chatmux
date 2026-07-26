@@ -49,8 +49,9 @@ export function handleResource(
 
     const chat = db.query<{
       id: number; platform: string; platform_id: string; type: string; name: string | null;
+      last_activity_at: number | null;
     }, [string, string]>(
-      "SELECT id, platform, platform_id, type, name FROM chats WHERE platform = ? AND platform_id = ?"
+      "SELECT id, platform, platform_id, type, name, last_activity_at FROM chats WHERE platform = ? AND platform_id = ?"
     ).get(platform, platformId);
 
     if (!chat) return JSON.stringify({ error: "chat not found" });
@@ -81,6 +82,7 @@ export function handleResource(
       message_count: stats.count,
       first_message_at: stats.first_at,
       last_message_at: stats.last_at,
+      last_activity_at: chat.last_activity_at,
     });
   }
 

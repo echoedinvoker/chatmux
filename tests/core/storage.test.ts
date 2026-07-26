@@ -193,6 +193,27 @@ describe("JSONL→SQLite sync", () => {
     expect(chat!.last_message_at).toBe(2000);
   });
 
+  // A landed message is itself an activity, so activity must never lag behind it. Letting
+  // only the adapter path write activity would leave a chat that has only ever received live
+  // messages with a NULL ordering key, sinking it to the bottom of the list.
+  test("should advance both last_message_at and last_activity_at, neither going backwards", () => {
+    syncEventToSQLite(db, { ...makeEvent("m_001", "第一條"), timestamp: 1000 });
+
+    const after = db.query<{ last_message_at: number; last_activity_at: number }, []>(
+      "SELECT last_message_at, last_activity_at FROM chats WHERE platform_id = 'c_001'"
+    ).get()!;
+    expect(after.last_message_at).toBe(1000);
+    expect(after.last_activity_at).toBeGreaterThanOrEqual(1000);
+
+    syncEventToSQLite(db, { ...makeEvent("m_002", "遲到的舊訊息"), timestamp: 500 });
+
+    const afterOld = db.query<{ last_message_at: number; last_activity_at: number }, []>(
+      "SELECT last_message_at, last_activity_at FROM chats WHERE platform_id = 'c_001'"
+    ).get()!;
+    expect(afterOld.last_message_at).toBe(1000);
+    expect(afterOld.last_activity_at).toBe(after.last_activity_at);
+  });
+
   test("should reuse existing contact on same platform_id", () => {
     syncEventToSQLite(db, makeEvent("m_001", "一"));
     syncEventToSQLite(db, makeEvent("m_002", "二"));
@@ -314,13 +335,27 @@ describe("Query functions", () => {
       expect(chats[0].last_message_text).toBe("最後一條");
     });
 
-    test("should order by last_message_at descending", () => {
+    test("should order by last_activity_at descending", () => {
       syncEventToSQLite(db, makeEvent("m_001", "舊聊天", { chatId: "c_001", chatName: "Old", timestamp: 1000 }));
       syncEventToSQLite(db, makeEvent("m_002", "新聊天", { chatId: "c_002", chatName: "New", timestamp: 2000 }));
 
       const chats = listChats(db);
       expect(chats[0].name).toBe("New");
       expect(chats[1].name).toBe("Old");
+    });
+
+    test("should order by last_activity_at, not last_message_at", () => {
+      syncEventToSQLite(db, makeEvent("m_001", "A 的訊息", { chatId: "c_001", chatName: "A", timestamp: 1000 }));
+      syncEventToSQLite(db, makeEvent("m_002", "B 的訊息", { chatId: "c_002", chatName: "B", timestamp: 2000 }));
+
+      // A 的落地訊息較舊，但 adapter 自報 A 剛有動靜（路徑 B）
+      db.query("UPDATE chats SET last_activity_at = ? WHERE platform_id = ?").run(9000, "c_001");
+
+      const chats = listChats(db);
+      expect(chats[0].name).toBe("A");
+      expect(chats[0].last_activity_at).toBe(9000);
+      expect(chats[0].last_message_at).toBe(1000);
+      expect(chats[1].name).toBe("B");
     });
   });
 

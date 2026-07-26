@@ -37,6 +37,7 @@ export interface ChatRow {
   type: string;
   name: string | null;
   last_message_at: number | null;
+  last_activity_at: number | null;
   last_message_text: string | null;
   message_count: number;
 }
@@ -179,7 +180,7 @@ export function listChats(
   const offset = opts?.offset ?? 0;
 
   let sql = `
-    SELECT c.id, c.platform, c.platform_id, c.type, c.name, c.last_message_at,
+    SELECT c.id, c.platform, c.platform_id, c.type, c.name, c.last_message_at, c.last_activity_at,
            (SELECT m.content_text FROM messages m WHERE m.chat_id = c.id ORDER BY m.timestamp DESC LIMIT 1) AS last_message_text,
            (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count
     FROM chats c
@@ -196,7 +197,7 @@ export function listChats(
     params.push(opts.search);
   }
 
-  sql += " ORDER BY c.last_message_at DESC NULLS LAST LIMIT ? OFFSET ?";
+  sql += " ORDER BY c.last_activity_at DESC NULLS LAST LIMIT ? OFFSET ?";
   params.push(limit, offset);
 
   return db.query<ChatRow, unknown[]>(sql).all(...params);

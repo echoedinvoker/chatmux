@@ -20,6 +20,9 @@ interface ListChatsResult {
   offset: number;
 }
 
+// last_message 一律讀 row.last_message_at（最後一則落地訊息），不是 last_activity_at。
+// 時間戳與 last_message_text／lastSender 都必須來自同一則 message；改讀 activity 會
+// 讓 adapter 自報的動靜時間配上一則更舊的訊息文字，即 F21 的原始症狀。
 function formatChat(row: ChatRow, db: Database): ChatOutput {
   const compositeId = `${row.platform}:${row.platform_id}`;
 
