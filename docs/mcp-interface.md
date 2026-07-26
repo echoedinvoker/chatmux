@@ -368,7 +368,7 @@ an adapter does not implement it, the message still lands, attributed to a senti
 
 Some platforms *do* echo self-sent messages back as live events (LINE does, Telegram does
 not). Core funnels both paths — its own landing and the platform echo — through a single
-entry point keyed on `platform_message_id`, first one wins. SQLite would have absorbed the
+entry point keyed on the chat plus `platform_message_id`, first one wins. SQLite would have absorbed the
 duplicate anyway via `INSERT OR IGNORE`; the append-only JSONL log would not, which is what
 the deduplication actually protects.
 

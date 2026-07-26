@@ -132,7 +132,7 @@ CREATE TABLE messages (
   seq INTEGER,
   edited_at INTEGER,
   retracted_at INTEGER,
-  UNIQUE(platform, platform_message_id)
+  UNIQUE(platform, chat_id, platform_message_id)
 );
 
 CREATE INDEX idx_messages_chat_timestamp ON messages(chat_id, timestamp DESC);
@@ -143,6 +143,24 @@ CREATE UNIQUE INDEX idx_messages_seq ON messages(seq);
 The last three columns arrived with protocol v0.5, added by an idempotent migration
 (`ALTER TABLE` guarded by a `PRAGMA table_info` check, then `UPDATE messages SET seq = id
 WHERE seq IS NULL` to seed, then the unique index).
+
+**Message identity is per chat, not per platform.** The constraint used to be
+`UNIQUE(platform, platform_message_id)`, which assumed a platform hands out message IDs
+that are unique across all of its chats. Telegram does not: every dialog counts up from a
+small number of its own, so two chats reaching ID `20445` is routine. The consequence was
+silent, because `upsertChat` runs before the insert — `chats.last_message_at` moved forward
+while `INSERT OR IGNORE` dropped the message row, leaving a chat sorted to the top of the
+list by a message nobody could open.
+
+SQLite cannot drop a table-level constraint, so `migrateMessageUniqueKey` does the official
+table rebuild: new table, copy (`id` and `seq` **verbatim** — `id` is the FTS
+`content_rowid` and the attachments foreign key, `seq` is a cursor already handed to pull
+consumers), drop, rename, rebuild indexes, `initFTS` + `INSERT INTO
+messages_fts(messages_fts) VALUES('rebuild')`, then `PRAGMA foreign_key_check`. It detects
+whether it has already run by reading `PRAGMA index_list` / `index_info` rather than
+matching DDL text, and both `PRAGMA foreign_keys` toggles sit **outside** the transaction:
+switching that pragma inside one is a silent no-op, which would leave the daemon's
+long-lived connection with foreign keys disabled for the rest of the process.
 
 | Column | Meaning |
 |--------|---------|
@@ -207,11 +225,15 @@ Consequences:
 - **Do not** expose `id` as message identity (NEVER #4). External identity is
   `platform:platform_message_id`. A cursor is a *position*, not an identity, which is
   why it is emitted as an opaque token (`evt:<seq>`).
+- **That external identity is unique only within a chat**, since the underlying constraint
+  is. Nothing currently takes a message ID as *input* to look a row up (only
+  `send_message` returns one, alongside `chat_id`), so it is sufficient today — but any
+  future tool that accepts a message ID must take the chat with it.
 - Rebuilding SQLite from JSONL replays the same file order, so `id` values are
   reproducible across a rebuild.
 
 **The sequence is sparse.** When `INSERT OR IGNORE` hits
-`UNIQUE(platform, platform_message_id)`, the AUTOINCREMENT value **has already been
+`UNIQUE(platform, chat_id, platform_message_id)`, the AUTOINCREMENT value **has already been
 allocated and is not reclaimed**. Backfill re-sending messages that already exist (the
 situation NEVER #7 anticipates) keeps burning sequence numbers without adding rows. On a
 real store of 1644 messages, `MAX(id)` had reached 18744, `sqlite_sequence` stood at
@@ -260,7 +282,7 @@ The FTS5 trigram tokenizer is what makes CJK substring search work.
 |---------|--------|---------|
 | Exposed externally (MCP tools/resources) | `platform:platform_id` | `line:u1234567890` |
 | Internal SQLite FK | auto-increment PK | `42` |
-| Dedup constraint | `UNIQUE(platform, platform_id)` or `UNIQUE(platform, platform_message_id)` | — |
+| Dedup constraint | `UNIQUE(platform, platform_id)` or `UNIQUE(platform, chat_id, platform_message_id)` | — |
 
 MCP tools accept and return the composite `platform:platform_id`. SQLite uses
 auto-increment PKs for FK joins internally, avoiding the complexity of composite-key
@@ -339,17 +361,19 @@ validation and per-event isolation apply to backfill too.
 ```
 landEvent(event)  ← from an adapter stdio notification, or from a successful send
   │
-  ├─ 0. `message` events only: deduplicate on `type:platform:platform_message_id`
+  ├─ 0. `message` events only: deduplicate on `type:platform:chat:platform_message_id`
   │     (in-memory, 60 s TTL). Already seen → return, write nothing. Otherwise
   │     record the key and continue. `edit` / `unsend` skip this step entirely.
   │
   ├─ 1. Append to JSONL (truth source; always succeeds unless the disk is full)
   │
   ├─ 2. Project into SQLite, branching on event type (see "Projecting change events"):
-  │     `message` →
+  │     `message` → a-e run in **one transaction**, so the chat's sort key can never
+  │       advance without the message row that justifies it:
   │       a. UPSERT contacts (platform, platform_id)
   │       b. UPSERT chats (platform, platform_id) and update last_message_at
   │       c. INSERT OR IGNORE messages, assigning seq = MAX(seq) + 1
+  │          (dropped silently? warn — see below)
   │       d. FTS5 trigger fires automatically
   │       e. INSERT attachments (for media content)
   │     `edit` / `unsend` → UPDATE the existing row in place, bump its seq
@@ -417,8 +441,16 @@ fallback chain exists for that, not out of defensiveness.
 
 ### Dedup semantics
 
-- **Two layers, protecting different things.** SQLite is defended by `UNIQUE(platform, platform_message_id)` + `INSERT OR IGNORE` and needs nothing else. JSONL is append-only with no constraint at all, so a duplicate there is permanent damage to the truth source — hence the in-memory check inside `landEvent`, before anything is written.
-- **The in-memory check guards `message` events only.** It exists for one race: core landing a message it just sent versus the platform echoing that same message back. Change events have no second source, so they never enter the map. Keying it by `type:platform:platform_message_id` and applying it to everything looks safer but is worse — a Telegram `edit` reuses the edited message's ID, so a bot rewriting one message ten times in a minute would have nine of those edits swallowed with no row written and no log line. A genuinely duplicated `unsend` instead costs one extra JSONL line, and since applying it is idempotent the SQLite state is unchanged.
+- **A swallowed insert is never silent.** `INSERT OR IGNORE` is a conflict-resolution
+algorithm, not a UNIQUE-only escape hatch: it discards CHECK and NOT NULL violations just
+as quietly. So when the statement reports `changes === 0`, core asks whether the chat
+actually ended up with that message. It did → a genuine re-delivery (routine: `syncCheck`
+replays the JSONL tail on every restart), stay quiet. It did not → the row vanished for
+some other reason, log a warning. Historically this path had no log line at all, which is
+what let the per-platform unique key corrupt the chat list unnoticed for weeks.
+
+**Two layers, protecting different things.** SQLite is defended by `UNIQUE(platform, chat_id, platform_message_id)` + `INSERT OR IGNORE` and needs nothing else. JSONL is append-only with no constraint at all, so a duplicate there is permanent damage to the truth source — hence the in-memory check inside `landEvent`, before anything is written.
+- **The in-memory check guards `message` events only.** It exists for one race: core landing a message it just sent versus the platform echoing that same message back. Change events have no second source, so they never enter the map. Keying it by `type:platform:chat:platform_message_id` and applying it to everything looks safer but is worse — a Telegram `edit` reuses the edited message's ID, so a bot rewriting one message ten times in a minute would have nine of those edits swallowed with no row written and no log line. A genuinely duplicated `unsend` instead costs one extra JSONL line, and since applying it is idempotent the SQLite state is unchanged.
 - **A self-sent message can arrive twice**: once when core lands it after a successful send, once when the platform echoes it back as a live event (LINE does this; Telegram does not). Whichever arrives first lands it; the other is dropped with a `deduped echo` log line. The window between them is small and unpredictable — the echo travels the adapter's push connection while the send response travels the RPC channel — which is why the check lives at the shared entry point rather than at either caller.
 - **Backfill interleaving with a live event**: JSONL gets two lines, being append-only; SQLite gets one row, thanks to `INSERT OR IGNORE`. More JSONL lines than SQLite rows is normal and expected. Backfill moves hundreds of messages at a time and stays outside the in-memory check by design.
 - **Counting rows in SQLite will not reveal duplicates.** `INSERT OR IGNORE` hides them. Verifying deduplication means counting lines in JSONL.

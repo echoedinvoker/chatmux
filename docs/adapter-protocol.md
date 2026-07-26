@@ -385,7 +385,7 @@ Each entry in `events` has the same shape as an `event` notification's params.
 
 **Backfill interleaving with live events**: backfill and live push can produce events with
 the same message ID. Core's Storage deduplicates with `INSERT OR IGNORE` against a UNIQUE
-constraint on (platform, platform_message_id). Adapters do not need to handle this — dedup
+constraint on (platform, chat_id, platform_message_id). Adapters do not need to handle this — dedup
 is core's responsibility.
 
 ### `shutdown`
@@ -455,7 +455,7 @@ extract a serializable subset.
 **Notes on `edit`:**
 
 - **Optional capability.** An adapter declares it in `supported_events`; core never requires it. LINE has no editing concept and does not implement it. This is the same opt-in mechanism as `get_message_boxes` (v0.3) and `get_self` (v0.4), applied to an event type instead of a method.
-- `platform_message_id` is **the edited message's own ID**, not a new one — same convention as `unsend`. Core looks the target up by `(platform, platform_message_id)` and updates that row in place.
+- `platform_message_id` is **the edited message's own ID**, not a new one — same convention as `unsend`. Core looks the target up by `(platform, chat.platform_id, platform_message_id)` and updates that row in place.
 - `content` is the **complete** post-edit content, not a diff. Core replaces, it does not merge.
 - `timestamp` is the edit time in epoch milliseconds. Platforms that do not report one may send 0; core falls back to arrival time.
 - `sender` is not required — core ignores it for `edit`, since the target row already has one.
@@ -468,7 +468,7 @@ extract a serializable subset.
 Core handles every event independently, so a malformed one costs you only that event. An adapter can rely on the following, regardless of which ingest path (live push or backfill) the event arrives on:
 
 - **Per-event isolation.** A malformed event never terminates the daemon and never aborts the remaining events in the same backfill batch.
-- **Required fields.** `platform_message_id` and `chat.platform_id` are required for every event type. A `message` additionally requires `content.type` and `sender.platform_id`; an `edit` additionally requires `content.type` and `content.text`. Events missing these are dropped with a warning on stderr — they are not written to storage.
+- **Required fields.** `platform_message_id` and `chat.platform_id` are required for every event type. For `edit` and `unsend`, `chat.platform_id` is not bookkeeping — core addresses the target row by `(platform, chat, platform_message_id)`, because message IDs repeat across chats on platforms like Telegram. An `edit` or `unsend` that arrives without a chat is logged and **not applied**: retracting the wrong chat's message is worse than retracting nothing. A `message` additionally requires `content.type` and `sender.platform_id`; an `edit` additionally requires `content.type` and `content.text`. Events missing these are dropped with a warning on stderr — they are not written to storage.
 - **`chat.type` is not required** for non-`message` events. Core fills in `"unknown"` internally to satisfy its storage type; that value is never written to the chats table and carries no meaning.
 - **Unknown `type` values are preserved, not dropped.** Core writes them to the JSONL event log and logs a warning. A future protocol version can add event types without older cores discarding them.
 - **Every event that changes stored state notifies subscribers.** `message`, `edit` and `unsend` all push. `read_receipt` does not — it is the only event type that changes nothing a consumer reads. (Before v0.5 only `message` pushed, because `edit` did not exist and `unsend` was stored without being applied.)

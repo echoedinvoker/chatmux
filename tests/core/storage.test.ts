@@ -724,9 +724,42 @@ describe("F16: per-chat message identity", () => {
       syncEventToSQLite(db, makeMessage("chat_B", "20445", "B 室的訊息"));
       expect(warnings.filter((w) => w.includes("20445"))).toEqual([]);
 
-      // Cross-chat collision: the row is silently dropped today — that must warn.
+      // The same id in another chat is no longer a collision: it lands, and stays quiet.
+      // (Before the per-chat unique key this row was silently dropped and had to warn; the
+      // warning path survives for any *other* cause of a swallowed insert, which is why it
+      // is asserted quiet here rather than deleted.)
       syncEventToSQLite(db, makeMessage("chat_A", "20445", "A 室的訊息"));
-      expect(warnings.filter((w) => w.includes("20445")).length).toBeGreaterThan(0);
+      expect(warnings.filter((w) => w.includes("20445"))).toEqual([]);
+
+      const landed = db
+        .query<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM messages WHERE platform_message_id = ?"
+        )
+        .get("20445");
+      expect(landed?.n).toBe(2);
+    } finally {
+      console.error = original;
+    }
+  });
+
+  // OR IGNORE is a conflict-resolution algorithm, not a UNIQUE-only escape hatch: it swallows
+  // CHECK and NOT NULL violations just as quietly. With the unique key now per chat, this is
+  // the remaining way a row can vanish, and it is what keeps the warning path falsifiable.
+  test("insert swallowed by a CHECK violation still warns", () => {
+    const warnings: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+
+    try {
+      const illegalSource = {
+        ...makeMessage("chat_A", "31337", "source 不合法"),
+        source: "smuggled",
+      } as unknown as JsonlEvent;
+
+      syncEventToSQLite(db, illegalSource);
+
+      expect(warnings.filter((w) => w.includes("31337")).length).toBeGreaterThan(0);
+      expect(db.query("SELECT id FROM messages WHERE platform_message_id = '31337'").all()).toEqual([]);
     } finally {
       console.error = original;
     }

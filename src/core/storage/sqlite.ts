@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import type { JsonlEvent } from "./jsonl";
+import { initFTS } from "./fts";
 
 export function initSchema(db: Database): void {
   db.exec("PRAGMA journal_mode = WAL");
@@ -78,6 +79,10 @@ export function initSchema(db: Database): void {
       created_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000)
     )
   `);
+
+  // Last: it copies `seq` (added by migrateChangeColumns) and its foreign_key_check covers
+  // attachments -> messages, so both must already exist.
+  migrateMessageUniqueKey(db);
 }
 
 /**
@@ -117,6 +122,108 @@ function migrateBackfillColumns(db: Database): void {
   if (!existing.has("backfill_state")) db.exec("ALTER TABLE chats ADD COLUMN backfill_state TEXT");
   if (!existing.has("backfill_attempted_at")) db.exec("ALTER TABLE chats ADD COLUMN backfill_attempted_at INTEGER");
   if (!existing.has("backfill_oldest_id")) db.exec("ALTER TABLE chats ADD COLUMN backfill_oldest_id TEXT");
+}
+
+/**
+ * Message identity is per chat, not per platform.
+ *
+ * Telegram hands out message ids that restart from a small number in every dialog, so
+ * `UNIQUE(platform, platform_message_id)` made two chats fight over the same id: the second
+ * arrival was swallowed by `INSERT OR IGNORE` after `upsertChat` had already moved
+ * `last_message_at` forward. SQLite cannot drop a table-level constraint, hence the rebuild.
+ *
+ * `id` is copied verbatim: it is the FTS content_rowid and the attachments foreign key.
+ * `seq` is copied verbatim too — it is the cursor pull consumers have already been handed.
+ */
+export function migrateMessageUniqueKey(db: Database): void {
+  if (hasPerChatUniqueKey(db)) return;
+
+  // PRAGMA foreign_keys is a silent no-op inside a transaction, so both ends live outside it.
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      db.exec("DROP TRIGGER IF EXISTS messages_fts_insert");
+      db.exec("DROP TRIGGER IF EXISTS messages_fts_delete");
+      db.exec("DROP TRIGGER IF EXISTS messages_fts_update");
+
+      db.exec(`
+        CREATE TABLE messages_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          platform TEXT NOT NULL,
+          platform_message_id TEXT NOT NULL,
+          chat_id INTEGER NOT NULL REFERENCES chats(id),
+          sender_id INTEGER REFERENCES contacts(id),
+          timestamp INTEGER NOT NULL,
+          content_type TEXT NOT NULL,
+          content_text TEXT,
+          content_media_url TEXT,
+          raw TEXT,
+          source TEXT NOT NULL CHECK(source IN ('live', 'backfill')),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
+          seq INTEGER,
+          edited_at INTEGER,
+          retracted_at INTEGER,
+          UNIQUE(platform, chat_id, platform_message_id)
+        )
+      `);
+
+      db.exec(`
+        INSERT INTO messages_new (
+          id, platform, platform_message_id, chat_id, sender_id, timestamp,
+          content_type, content_text, content_media_url, raw, source, created_at,
+          seq, edited_at, retracted_at
+        )
+        SELECT
+          id, platform, platform_message_id, chat_id, sender_id, timestamp,
+          content_type, content_text, content_media_url, raw, source, created_at,
+          seq, edited_at, retracted_at
+        FROM messages
+      `);
+
+      db.exec("DROP TABLE messages");
+      db.exec("ALTER TABLE messages_new RENAME TO messages");
+
+      db.exec("CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages(chat_id, timestamp DESC)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC)");
+      db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_seq ON messages(seq)");
+
+      initFTS(db);
+      db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");
+
+      const violations = db.query("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new Error(`migrateMessageUniqueKey: foreign_key_check reported ${violations.length} violation(s)`);
+      }
+    })();
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+/**
+ * Read the constraint from the index catalogue rather than matching `sqlite_master.sql` as
+ * text: whitespace and casing differ between the original DDL and what a rebuild writes back.
+ */
+function hasPerChatUniqueKey(db: Database): boolean {
+  const indexes = db
+    .query<{ name: string; unique: number; origin: string }, []>("PRAGMA index_list(messages)")
+    .all();
+
+  return indexes.some((index) => {
+    if (index.unique !== 1 || index.origin !== "u") return false;
+
+    const columns = db
+      .query<{ name: string }, []>(`PRAGMA index_info(${JSON.stringify(index.name)})`)
+      .all()
+      .map((c) => c.name);
+
+    return (
+      columns.length === 3 &&
+      columns.includes("platform") &&
+      columns.includes("chat_id") &&
+      columns.includes("platform_message_id")
+    );
+  });
 }
 
 const NEXT_SEQ = "(SELECT COALESCE(MAX(seq), 0) + 1 FROM messages)";
@@ -209,7 +316,7 @@ export function syncEventToSQLite(db: Database, event: JsonlEvent): void {
 
   if (swallowed) {
     console.error(
-      `[storage] WARN: message ${event.platform}:${event.platform_message_id} not inserted into chat ${event.chat.platform_id} — an id collision outside this chat swallowed it`
+      `[storage] WARN: message ${event.platform}:${event.platform_message_id} not inserted into chat ${event.chat.platform_id} — OR IGNORE swallowed it (constraint violation outside this chat's identity)`
     );
   }
 }

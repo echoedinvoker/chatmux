@@ -123,7 +123,7 @@ happens to echo it back — LINE does, Telegram does not.
 
 Both paths above funnel through `landEvent` (`src/core/storage/land-event.ts`), never
 appending on their own. For `message` events it keeps an in-memory map of recently landed
-`type:platform:platform_message_id` keys (60 s TTL) and lands whichever path arrives first,
+`type:platform:chat:platform_message_id` keys (60 s TTL) and lands whichever path arrives first,
 dropping the other with a `deduped echo` log line.
 
 **Only `message` events are deduplicated.** The map exists for exactly one race — core
