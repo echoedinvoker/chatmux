@@ -28,6 +28,7 @@ export function initSchema(db: Database): void {
       type TEXT NOT NULL CHECK(type IN ('direct', 'group', 'room')),
       name TEXT,
       last_message_at INTEGER,
+      last_activity_at INTEGER,
       raw TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
@@ -132,6 +133,40 @@ function migrateBackfillColumns(db: Database): void {
   if (!existing.has("backfill_state")) db.exec("ALTER TABLE chats ADD COLUMN backfill_state TEXT");
   if (!existing.has("backfill_attempted_at")) db.exec("ALTER TABLE chats ADD COLUMN backfill_attempted_at INTEGER");
   if (!existing.has("backfill_oldest_id")) db.exec("ALTER TABLE chats ADD COLUMN backfill_oldest_id TEXT");
+}
+
+/**
+ * Splits the one column that served two masters.
+ *
+ * `last_message_at` used to be written by two unrelated paths: landed messages, and adapters
+ * self-reporting chat recency. The adapter value is the right ordering key but has no message
+ * behind it, so the list and the chat contents disagreed. After this, `last_activity_at`
+ * inherits the adapter value (ordering) and `last_message_at` means exactly "the newest
+ * message you can actually open" — for which MAX(messages.timestamp) is the definition, not
+ * an approximation. Nothing is discarded: the old gap becomes the difference between the two.
+ *
+ * The guard covers the whole function, not just the ALTER. `initSchema` runs on every daemon
+ * start, and re-seeding activity from last_message_at on a later run would drag an already
+ * advanced activity backwards.
+ *
+ * Retracted messages count towards MAX(m.timestamp): unsend is a tombstone (`retracted_at`
+ * set, content nulled), the row is still there, and the user still opens the chat and sees
+ * it. So the newest message can legitimately be one whose text is NULL — consumers get a
+ * timestamp with no text, which is defined behaviour, not a gap.
+ */
+export function migrateActivityColumn(db: Database): void {
+  const existing = new Set(
+    db.query<{ name: string }, []>("PRAGMA table_info(chats)").all().map((c) => c.name)
+  );
+  if (existing.has("last_activity_at")) return;
+
+  db.transaction(() => {
+    db.exec("ALTER TABLE chats ADD COLUMN last_activity_at INTEGER");
+    // Order matters: seed activity from the old value before that value is recomputed.
+    db.exec("UPDATE chats SET last_activity_at = last_message_at");
+    db.exec(`UPDATE chats SET last_message_at =
+      (SELECT MAX(m.timestamp) FROM messages m WHERE m.chat_id = chats.id)`);
+  })();
 }
 
 /**
@@ -354,11 +389,12 @@ function landMessage(db: Database, event: JsonlEvent): boolean {
   ).get(event.platform, event.sender.platform_id)!.id;
 
   const upsertChat = db.prepare(`
-    INSERT INTO chats (platform, platform_id, type, name, last_message_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO chats (platform, platform_id, type, name, last_message_at, last_activity_at)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(platform, platform_id) DO UPDATE SET
       name = COALESCE(excluded.name, chats.name),
       last_message_at = MAX(COALESCE(chats.last_message_at, 0), excluded.last_message_at),
+      last_activity_at = MAX(COALESCE(chats.last_activity_at, 0), excluded.last_activity_at),
       updated_at = (unixepoch('now', 'subsec') * 1000)
   `);
   upsertChat.run(
@@ -366,6 +402,7 @@ function landMessage(db: Database, event: JsonlEvent): boolean {
     event.chat.platform_id,
     event.chat.type,
     event.chat.name ?? null,
+    event.timestamp,
     event.timestamp
   );
 

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { JsonlWriter, type JsonlEvent } from "./storage/jsonl.js";
 import { initSchema, syncEventToSQLite } from "./storage/sqlite.js";
 import { replayFrom } from "./storage/replay.js";
+import { upsertChatsFromAdapter, applyMessageBoxRecency, type AdapterChat } from "./storage/adapter-recency.js";
 import { initFTS } from "./storage/fts.js";
 import { makeLandEvent } from "./storage/land-event.js";
 import { makeIngestEvent } from "./ingest.js";
@@ -377,28 +378,11 @@ async function coldStartAdapter(platform: string): Promise<void> {
 
   try {
     const chatsResult = await manager.sendRequest(platform, "get_chats", {}) as {
-      chats: { platform_id: string; type: string; name: string; last_message_at?: number | null }[];
+      chats: AdapterChat[];
     };
     console.error(`[daemon] [${platform}] fetched ${chatsResult.chats.length} chats`);
 
-    for (const chat of chatsResult.chats) {
-      // last_message_at is the optional backfill ordering signal (protocol v0.3).
-      // MAX so a null from a v0.2 adapter never clobbers a known value; NULLIF
-      // keeps "no signal at all" as NULL rather than epoch 0, so a degraded
-      // ordering stays visible instead of masquerading as a real timestamp.
-      const upsert = db.prepare(`
-        INSERT INTO chats (platform, platform_id, type, name, last_message_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(platform, platform_id) DO UPDATE SET
-          name = COALESCE(excluded.name, chats.name),
-          last_message_at = NULLIF(MAX(
-            COALESCE(chats.last_message_at, 0),
-            COALESCE(excluded.last_message_at, 0)
-          ), 0),
-          updated_at = (unixepoch('now', 'subsec') * 1000)
-      `);
-      upsert.run(platform, chat.platform_id, chat.type, chat.name, chat.last_message_at ?? null);
-    }
+    upsertChatsFromAdapter(db, platform, chatsResult.chats);
   } catch (err) {
     console.error(`[daemon] [${platform}] get_chats failed:`, err);
   }
@@ -410,8 +394,7 @@ async function coldStartAdapter(platform: string): Promise<void> {
     }[];
     console.error(`[daemon] [${platform}] discovered ${boxes.length} active conversations (incl. 1:1)`);
 
-    // get_chats is the sole authority on which chats exist and what type they
-    // are. get_message_boxes only refines recency for chats already known.
+    // get_message_boxes only refines recency for chats get_chats already reported.
     //
     // It used to insert unknown boxes with `contactName ? "direct" : "group"`,
     // i.e. guessing the type from whether a contact display name was cached.
@@ -420,15 +403,7 @@ async function coldStartAdapter(platform: string): Promise<void> {
     // would have been filed as a group. There is no honest type to guess here
     // (the column is NOT NULL CHECK IN ('direct','group','room')), so an
     // unknown box is reported as a gap in get_chats instead of invented.
-    let unknown = 0;
-    for (const box of boxes) {
-      const updated = db.prepare(`
-        UPDATE chats SET last_message_at = MAX(COALESCE(last_message_at, 0), ?)
-        WHERE platform_id = ? AND platform = ?
-      `).run(box.lastDeliveredTime || null, box.id, platform);
-
-      if (updated.changes === 0) unknown++;
-    }
+    const unknown = applyMessageBoxRecency(db, platform, boxes);
 
     if (unknown > 0) {
       console.error(
@@ -451,8 +426,8 @@ async function coldStartAdapter(platform: string): Promise<void> {
 }
 
 async function backfillAdapter(platform: string): Promise<void> {
-  const chats = db.query<{ platform_id: string; last_message_at: number | null }, [string]>(
-    "SELECT platform_id, last_message_at FROM chats WHERE platform = ? ORDER BY last_message_at DESC NULLS LAST"
+  const chats = db.query<{ platform_id: string; last_activity_at: number | null }, [string]>(
+    "SELECT platform_id, last_activity_at FROM chats WHERE platform = ? ORDER BY last_activity_at DESC NULLS LAST"
   ).all(platform);
 
   let totalBackfilled = 0;
