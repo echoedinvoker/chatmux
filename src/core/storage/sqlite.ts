@@ -94,6 +94,10 @@ export function initSchema(db: Database): void {
   // Last: it copies `seq` (added by migrateChangeColumns) and its foreign_key_check covers
   // attachments -> messages, so both must already exist.
   migrateMessageUniqueKey(db);
+
+  // After migrateMessageUniqueKey: it rebuilds `messages`, and this one reads that table to
+  // recompute last_message_at.
+  migrateActivityColumn(db);
 }
 
 /**
