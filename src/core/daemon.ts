@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import { JsonlWriter, type JsonlEvent } from "./storage/jsonl.js";
 import { initSchema, syncEventToSQLite } from "./storage/sqlite.js";
-import { replayJsonl } from "./storage/replay.js";
+import { replayFrom } from "./storage/replay.js";
 import { initFTS } from "./storage/fts.js";
 import { makeLandEvent } from "./storage/land-event.js";
 import { makeIngestEvent } from "./ingest.js";
@@ -486,22 +486,27 @@ async function backfillAdapter(platform: string): Promise<void> {
 }
 
 /**
- * Re-project the JSONL tail so SQLite catches up on anything the last run dropped.
+ * Re-project the log from the last checkpoint so SQLite catches up on anything the last run
+ * dropped.
  *
- * The previous version only replayed `message` events it could not find in the table. That
- * test is meaningless for change events: an edit's target row exists by definition, so it was
- * always judged "not missing" and never replayed. Replaying the whole tail unconditionally is
- * correct instead because every branch of the projection is idempotent — messages via
- * INSERT OR IGNORE, unsend by refusing to re-stamp an already retracted row, edits by
- * short-circuiting when content and edited_at already match. Without that edit short-circuit
- * every restart would bump seq and hand pull consumers an event with no state change.
+ * Replaying a fixed tail of 100 lines assumed the only gap is "what arrived while the daemon
+ * was down". That holds for a normal restart and fails silently twice over: a rebuilt database
+ * recovers only its last hundred lines, and a long stop (backfill produces thousands of lines
+ * an hour) loses the middle. The checkpoint in `sync_state` makes the gap exact.
+ *
+ * Replaying unconditionally — rather than hunting for "missing" messages — is correct because
+ * every branch of the projection is idempotent: messages via INSERT OR IGNORE, unsend by
+ * refusing to re-stamp an already retracted row, edits by short-circuiting when content and
+ * edited_at already match. The earlier missing-message test was meaningless for change events,
+ * since an edit's target row exists by definition and was therefore never replayed.
  */
 function syncCheck(): void {
-  const tailEvents = jsonl.readTailLines(100);
-  if (tailEvents.length === 0) return;
+  const result = replayFrom(db, jsonl);
+  if (result.events === 0) return;
 
-  replayJsonl(db, tailEvents);
-  console.error(`[daemon] sync check: replayed ${tailEvents.length} tail events`);
+  console.error(
+    `[daemon] sync check: replayed ${result.events} events in ${result.batches} batches (offset → ${result.finalOffset})`,
+  );
 }
 
 // 執行期的 async 漏網不該打掉整個長駐 service（所有 MCP 連線斷掉 + 冷啟動重跑 backfill）。

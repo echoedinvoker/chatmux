@@ -63,6 +63,16 @@ export function initSchema(db: Database): void {
     ON messages(timestamp DESC)
   `);
 
+  // No row means "never synced": a fresh database and one rebuilt from scratch are the same
+  // case, and both must replay the log from offset 0.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_state (
+      source TEXT PRIMARY KEY,
+      byte_offset INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000)
+    )
+  `);
+
   migrateChangeColumns(db);
   migrateBackfillColumns(db);
 

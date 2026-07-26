@@ -439,6 +439,45 @@ pending table would produce one.
 `0` is falsy in every `if (row.retracted_at)`, which would read as "not retracted". The
 fallback chain exists for that, not out of defensiveness.
 
+### Replay checkpoint
+
+```sql
+CREATE TABLE sync_state (
+  source      TEXT PRIMARY KEY,   -- always 'events.jsonl' today; the column exists for later sources
+  byte_offset INTEGER NOT NULL,   -- bytes already projected; the next read starts here
+  updated_at  INTEGER NOT NULL DEFAULT (unixepoch('now','subsec') * 1000)
+);
+```
+
+**No row means never synced**, so a fresh database and a rebuilt one both project the whole
+log from offset 0 — the same "absent is unknown" reading `migrateBackfillColumns` uses for its
+NULLs.
+
+Startup used to replay a fixed tail of 100 lines. That assumed the only gap is what arrived
+while the daemon was down, which is true for a normal restart and silently wrong twice over:
+a rebuilt database recovered only its last hundred lines, and a stop long enough for backfill
+to run (thousands of lines an hour) lost the middle. It is the reason 145 messages sat in the
+log with no row to show for them.
+
+`replayFrom(db, jsonl, { batchBytes })` reads forward in batches, and **each batch commits its
+events and its new offset in one transaction** — a crash resumes on a batch boundary instead of
+from the start. Batch size is measured in bytes, not lines, because line length spans roughly
+24× (1,506 bytes average against a 35,985-byte maximum in the real log); the 4.5 MB default is
+about 3,000 lines. The size is a crash-redo granularity knob, not a throughput one: replaying
+the full 93k-event log takes about 6 seconds either way.
+
+Two boundary rules keep the offset honest, both covered by `tests/core/sync-checkpoint.test.ts`:
+
+- **A torn trailing line is discarded** and the offset stops after the last complete newline.
+The log is appended to while it is read, so half a line is routine; swallowing it would throw
+in `JSON.parse` and desynchronise every later checkpoint.
+- **A batch too small to hold one line overshoots to the next newline anyway.** Without that,
+a line longer than `batchBytes` would leave the offset where it started and spin the replay
+loop forever.
+
+If the file is shorter than the stored offset (truncated or rotated), the projection warns and
+replays from 0.
+
 ### Dedup semantics
 
 - **A swallowed insert is never silent.** `INSERT OR IGNORE` is a conflict-resolution
@@ -454,7 +493,7 @@ what let the per-platform unique key corrupt the chat list unnoticed for weeks.
 - **A self-sent message can arrive twice**: once when core lands it after a successful send, once when the platform echoes it back as a live event (LINE does this; Telegram does not). Whichever arrives first lands it; the other is dropped with a `deduped echo` log line. The window between them is small and unpredictable — the echo travels the adapter's push connection while the send response travels the RPC channel — which is why the check lives at the shared entry point rather than at either caller.
 - **Backfill interleaving with a live event**: JSONL gets two lines, being append-only; SQLite gets one row, thanks to `INSERT OR IGNORE`. More JSONL lines than SQLite rows is normal and expected. Backfill moves hundreds of messages at a time and stays outside the in-memory check by design.
 - **Counting rows in SQLite will not reveal duplicates.** `INSERT OR IGNORE` hides them. Verifying deduplication means counting lines in JSONL.
-- **Startup sync check**: replays the last 100 JSONL lines through the projection (`replayJsonl`), which fills in any message SQLite is missing and re-applies any change event in that window. It replays rather than checking for missing IDs because a change event alters an existing row instead of adding one, so an existence check would never notice a lost edit. Re-application is harmless: identical edits and repeat retractions short-circuit without moving `seq`. It never aborts startup.
+- **Startup sync check**: replays the JSONL from the checkpoint in `sync_state` through the projection (`replayFrom`), which fills in any message SQLite is missing and re-applies any change event since the last run. It replays rather than checking for missing IDs because a change event alters an existing row instead of adding one, so an existence check would never notice a lost edit. Re-application is harmless: identical edits and repeat retractions short-circuit without moving `seq`. It never aborts startup. See [Replay checkpoint](#replay-checkpoint) for why the fixed 100-line tail it replaced lost data.
 
 ## Capacity estimate
 
