@@ -448,7 +448,10 @@ silently short. The response carries `total`, so a consumer can compare it again
 `chats.length` and tell the user rather than presenting a truncated list as complete.
 Consumers wanting the whole list should read this resource rather than calling
 `list_chats` with no arguments: that tool defaults to `limit: 50`, and since chats sort
-`last_message_at DESC NULLS LAST`, chats with no messages fall off the end first.
+`last_activity_at DESC NULLS LAST`, chats the adapter reported no activity for fall off the
+end first. Note this is **not** the same as "chats with no messages": a chat core has never
+landed a message for still sorts near the top if the adapter says it saw recent
+activity — that gap is the point of the two columns (see storage-schema.md).
 
 ### `chat://chats/{id}/messages`
 
@@ -490,7 +493,8 @@ Details for one chat.
   ],
   "message_count": 1234,
   "first_message_at": 1680000000000,
-  "last_message_at": 1690000000000
+  "last_message_at": 1690000000000,
+  "last_activity_at": 1690345600000
 }
 ```
 

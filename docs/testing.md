@@ -174,6 +174,19 @@ between layers. All three v0.1 send bugs slipped through exactly that way. A liv
 integration test exercises the whole chain: `handleSendMessage` (tools.ts) →
 `AdapterRunner` → adapter child process → platform API, against a real session.
 
+> **Where the chain stops.** It stops at the platform API. The suite builds its own
+> `AdapterRunner` and passes a `SendDeps` of just `{ safetyRail, sendToAdapter,
+> isAdapterConnected }` — no database, no JSONL writer. It asserts the send RPC succeeded
+> (`success`, `message_id`, `timestamp`) and nothing more. It cannot tell you the message
+> landed: no `messages` row, no `events.jsonl` line, no `chats.last_message_at` advance.
+> It also cannot, by construction — running it requires stopping the daemon, which is the
+> process that does the landing.
+>
+> To verify landing end to end, drive the **running** daemon's MCP `send_message`
+> (`127.0.0.1:7717/mcp`) instead. That is the path nvim actually takes — sidecar → daemon
+> MCP → adapter → event back → `landMessage` — so it reaches all three sinks and needs no
+> downtime. Assume the two are interchangeable and you will verify a send that never landed.
+
 ### Why they are gated
 
 They need a real platform login session and a safe send target, so they cannot run in CI

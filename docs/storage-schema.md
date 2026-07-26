@@ -79,7 +79,8 @@ CREATE TABLE chats (
   platform_id TEXT NOT NULL,
   type TEXT NOT NULL CHECK(type IN ('direct', 'group', 'room')),
   name TEXT,
-  last_message_at INTEGER,
+  last_message_at INTEGER,          -- newest LANDED message (= MAX(messages.timestamp))
+  last_activity_at INTEGER,         -- newest activity the platform reported; >= last_message_at
   backfill_state TEXT,             -- unknown|partial|exhausted|unavailable (NULL = unknown)
   backfill_attempted_at INTEGER,   -- ms; set on every attempt, success or failure
   backfill_oldest_id TEXT,         -- anchor used last time, to detect a stalled walk
@@ -106,12 +107,54 @@ call cannot distinguish a chat that bottoms out from a platform withholding the 
 `unavailable` is reserved for a chat with no anchor at all that came back empty; a network
 error or a disconnected adapter must never be recorded as either.
 
-**NULL semantics for `last_message_at`**: NULL means "the adapter gave no ordering
-signal", not "a long time ago". Writes guard existing values with
+**Two columns, because the old one answered two questions with one number.**
+`last_activity_at` is what the platform says happened; `last_message_at` is what core
+actually has. They are written by two paths that never meet:
+
+| Column | Written by | Means | Read by |
+|--------|-----------|-------|---------|
+| `last_activity_at` | the adapter path — `get_chats` / `get_message_boxes` upserts, **and** every landed message | "the platform saw something here at T" | chat-list ordering, cold-start backfill ordering |
+| `last_message_at` | `landMessage` only, inside the message's own transaction | "the newest message core can actually open is from T" | the chat list's last-message preview, unread state |
+
+**Invariant: `last_activity_at >= last_message_at`** for every row where both have values.
+
+`migrateActivityColumn` splits an existing database, and two of its properties are load-bearing.
+**Order**: it copies the old column into `last_activity_at` *before* recomputing
+`last_message_at` as `MAX(m.timestamp)`. Reversed, the adapter's reported time is gone for good
+— nothing else in the system remembers it. **Gate**: the early return covers the whole function,
+not just the `ALTER`, because `initSchema` runs on every daemon start; a gate around the `ALTER`
+alone would re-run the copy each boot and drag `last_activity_at` backwards onto whatever
+`last_message_at` happened to be. Both follow `migrateMessageUniqueKey`'s precedent, and it must
+run *after* that one, which rebuilds the `messages` table this migration reads.
+It holds because `landMessage` advances *both* columns — a landed message is itself an
+activity, so the activity set is a superset of the landed-message set. Letting only the
+adapter path write activity would leave a chat that has only ever received live messages
+with a NULL ordering key, sinking it to the bottom of `NULLS LAST`.
+
+The gap between the two columns is not an error to be reconciled; it is the fact being
+recorded. A LINE chat whose `last_activity_at` sits four days ahead of its
+`last_message_at` is saying "the platform reports traffic core never received an event
+for" — which is exactly what is true. Collapsing that gap by overwriting either column
+throws the information away.
+
+**NULL semantics (both columns)**: NULL means "no signal", not "a long time ago". For
+`last_activity_at` it means the adapter gave no ordering signal; for `last_message_at` it
+means no message has landed in that chat. Writes guard existing values with
 `MAX(COALESCE(...))`, but that **must be wrapped in `NULLIF(..., 0)`** — otherwise, when
 both sides are NULL, epoch `0` gets written, disguising "no ordering signal at all" as a
-real timestamp and making a degraded backfill ordering **undetectable**.
-`ORDER BY last_message_at DESC NULLS LAST` depends on that distinction.
+real timestamp and making a degraded backfill ordering **undetectable**. SQLite's scalar
+`max()` returns NULL if *any* argument is NULL (`SELECT max(5, NULL) IS NULL` → 1), so an
+unguarded write can silently clear a healthy value.
+`ORDER BY last_activity_at DESC NULLS LAST` depends on that distinction.
+
+**A retracted message still counts toward `last_message_at`.** An unsend writes a
+tombstone (`content_text = NULL`, `retracted_at` set) and leaves the row in `messages`, so
+it stays inside `MAX(m.timestamp)` — the user opens the chat and sees the tombstone, so the
+chat's newest message genuinely is that one. The consequence is a legal combination
+consumers must tolerate: `last_message.timestamp` has a value while `last_message.text` is
+`null`. That is **defined behaviour**, not a missing-data bug; do not fall back to the
+previous message's text to fill the gap, or the timestamp and the text stop being the same
+message.
 
 ### messages
 
@@ -150,7 +193,9 @@ that are unique across all of its chats. Telegram does not: every dialog counts 
 small number of its own, so two chats reaching ID `20445` is routine. The consequence was
 silent, because `upsertChat` runs before the insert — `chats.last_message_at` moved forward
 while `INSERT OR IGNORE` dropped the message row, leaving a chat sorted to the top of the
-list by a message nobody could open.
+list by a message nobody could open. (Since the v0.7 split, ordering reads
+`last_activity_at` and `last_message_at` is only ever written alongside a message row that
+landed, so the same failure can no longer take that shape.)
 
 SQLite cannot drop a table-level constraint, so `migrateMessageUniqueKey` does the official
 table rebuild: new table, copy (`id` and `seq` **verbatim** — `id` is the FTS
@@ -371,7 +416,8 @@ landEvent(event)  ← from an adapter stdio notification, or from a successful s
   │     `message` → a-e run in **one transaction**, so the chat's sort key can never
   │       advance without the message row that justifies it:
   │       a. UPSERT contacts (platform, platform_id)
-  │       b. UPSERT chats (platform, platform_id) and update last_message_at
+  │       b. UPSERT chats (platform, platform_id), advancing BOTH last_message_at
+  │          and last_activity_at (neither goes backwards)
   │       c. INSERT OR IGNORE messages, assigning seq = MAX(seq) + 1
   │          (dropped silently? warn — see below)
   │       d. FTS5 trigger fires automatically

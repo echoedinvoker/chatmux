@@ -1,7 +1,7 @@
 # Adapter Protocol
 
-> **Protocol version**: 0.6
-> **Validated against**: LINE (v0.1, v0.4, v0.5, v0.6), Telegram (v0.2, v0.3, v0.4, v0.5, v0.6)
+> **Protocol version**: 0.7
+> **Validated against**: LINE (v0.1, v0.4, v0.5, v0.6, v0.7), Telegram (v0.2, v0.3, v0.4, v0.5, v0.6 — still sends the deprecated `last_message_at` name, which core accepts as an alias)
 > **Changelog**: at the bottom of this document
 
 A chatmux adapter is a child process that talks to the core daemon over
@@ -189,7 +189,7 @@ Returns the chat list: groups and DMs.
       "platform_id": "c1234567890abcdef",
       "type": "group",
       "name": "工作群組",
-      "last_message_at": 1690000000000,
+      "last_activity_at": 1690000000000,
       "raw": { ... }
     },
     {
@@ -206,11 +206,24 @@ Returns the chat list: groups and DMs.
 `raw` is optional. A DM's `name` comes from the contacts map or from the adapter's own
 resolution; an unknown DM has a null name.
 
-**`last_message_at`** (optional, since v0.3): the timestamp of the chat's most recent
-message, in epoch milliseconds.
+**`last_activity_at`** (optional, since v0.7; named `last_message_at` in v0.3–v0.6):
+the timestamp of the chat's most recent activity as *the platform sees it*, in epoch
+milliseconds.
+
+⚠️ **This is not a claim that core received that message.** The field was renamed in v0.7
+precisely because the old name implied it was. On LINE, `lastDeliveredTime` covers messages
+whose events never reached core, so this value routinely runs ahead of the newest row in
+core's `messages` table. Core now stores it in `chats.last_activity_at` and keeps
+`chats.last_message_at` for the newest *landed* message — two columns, two meanings, with
+the invariant `last_activity_at >= last_message_at`.
+
+> **Deprecated alias**: an adapter that still sends `last_message_at` keeps working
+> unchanged — core reads `last_activity_at ?? last_message_at`. The old name is
+> **deprecated since v0.7**; no removal date is set, and none will be set until every
+> known adapter has migrated.
 
 This is core's **ordering signal for cold-start backfill** — core sorts by
-`last_message_at DESC` and spends its global budget of 500 messages starting from the most
+`last_activity_at DESC` and spends its global budget of 500 messages starting from the most
 active conversations. Providing it is strongly recommended:
 
 - **Provided** → the cold-start budget goes to conversations with recent activity.
@@ -226,9 +239,9 @@ returning null never overwrites what is already stored.
 > **Optional since v0.2.** An adapter that does not support it replies with JSON-RPC error
 > `-32601` (Method not found). Core **looks only at `error.code`** — it never matches on
 > the message text, so word it however you like — then skips this step and uses
-> `last_message_at` from `get_chats` for backfill ordering instead.
+> `last_activity_at` from `get_chats` for backfill ordering instead.
 >
-> ⚠️ **An adapter that does not implement this method should provide `last_message_at` in
+> ⚠️ **An adapter that does not implement this method should provide `last_activity_at` in
 > `get_chats`.** Otherwise core has no ordering signal at all and the cold-start backfill
 > budget goes to arbitrary conversations. (v0.2 promised this fallback without providing a
 > field it could use; v0.3 closed that gap.)
@@ -602,6 +615,15 @@ A valid adapter is a standalone program in any language that only needs to:
 ---
 
 ## Changelog
+
+### v0.7 — the ordering signal is activity, not a landed message
+
+Additive and non-breaking; a v0.6 adapter runs unchanged via the deprecated alias.
+
+| Change | Rationale |
+|--------|-----------|
+| Renamed `last_message_at` → `last_activity_at` in §`get_chats` and §`get_message_boxes` ordering | The old name asserted something the value cannot promise. LINE's `lastDeliveredTime` covers messages core never received an event for, so core was storing "the platform saw activity at T" in a column read as "the newest message is from T" — the chat list then paired that timestamp with the text of a much older message. Core now keeps the two apart (`chats.last_activity_at` vs `chats.last_message_at`, invariant `last_activity_at >= last_message_at`) |
+| Old name kept as a deprecated alias (core reads `last_activity_at ?? last_message_at`) | The Telegram adapter lives outside this repo; a hard rename would have silently cost it its backfill ordering signal. No removal date is set |
 
 ### v0.6 — backfill can say "before *this* message"
 

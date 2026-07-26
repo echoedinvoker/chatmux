@@ -164,13 +164,14 @@ Daemon starts
   → Core waits for each adapter's status "connected" notification (120 s timeout)
   → for each connected adapter:
     → get_contacts → contacts written to Storage
-    → get_chats → chats written to Storage (including the optional last_message_at,
-                  the v0.3 backfill ordering signal)
+    → get_chats → chats written to Storage (including the optional last_activity_at,
+                  the ordering signal; v0.3–v0.6 adapters send it as last_message_at
+                  and core reads the old name as a deprecated alias)
     → get_message_boxes (optional, skipped when error.code === -32601)
-        → only fills in last_message_at for chats already in the chats table
+        → only fills in last_activity_at for chats already in the chats table
         → any box absent from get_chats is skipped with a WARN — type is never
           guessed, get_chats is the sole authority
-    → backfill: walk chats by last_message_time descending, 50 messages per round
+    → backfill: walk chats by last_activity_at descending, 50 messages per round
       → stops as soon as a global counter hits 500 (does not finish every chat)
       → one pass only — the rest of history is fetched on demand (below)
   → MCP Server starts

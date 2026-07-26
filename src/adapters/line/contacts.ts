@@ -112,13 +112,13 @@ export async function handleGetChats(
     platform_id: string;
     type: "group" | "direct";
     name: string | null;
-    last_message_at: number | null;
+    last_activity_at: number | null;
     raw?: unknown;
   }[] = groups.map((c) => ({
     platform_id: c.chatMid,
     type: "group" as const,
     name: c.chatName,
-    last_message_at: lastMessageAt.get(c.chatMid) ?? null,
+    last_activity_at: lastMessageAt.get(c.chatMid) ?? null,
     raw: c,
   }));
 
@@ -128,14 +128,14 @@ export async function handleGetChats(
         platform_id: box.id,
         type: "direct",
         name: contactsMap?.get(box.id) ?? null,
-        last_message_at: lastMessageAt.get(box.id) ?? null,
+        last_activity_at: lastMessageAt.get(box.id) ?? null,
       });
     } else if (!groupMids.has(box.id)) {
       result.push({
         platform_id: box.id,
         type: "group",
         name: null,
-        last_message_at: lastMessageAt.get(box.id) ?? null,
+        last_activity_at: lastMessageAt.get(box.id) ?? null,
       });
     }
   }
