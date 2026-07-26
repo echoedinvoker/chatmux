@@ -440,7 +440,15 @@ Every chat, with a summary of its most recent message.
 
 **URI**: `chat://chats`
 
-**Response**: same shape as the `list_chats` tool output, unpaginated — all chats.
+**Response**: same shape as the `list_chats` tool output — all chats, with no
+`platform` / `search` / `offset` filtering.
+
+⚠️ **"Unpaginated" means a hard-coded `limit: 1000`, not unbounded.** Past that the list is
+silently short. The response carries `total`, so a consumer can compare it against
+`chats.length` and tell the user rather than presenting a truncated list as complete.
+Consumers wanting the whole list should read this resource rather than calling
+`list_chats` with no arguments: that tool defaults to `limit: 50`, and since chats sort
+`last_message_at DESC NULLS LAST`, chats with no messages fall off the end first.
 
 ### `chat://chats/{id}/messages`
 
