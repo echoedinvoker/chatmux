@@ -603,3 +603,132 @@ describe("Name protection: raw MID should not overwrite good names", () => {
     expect(contact.display_name).toBe("真名");
   });
 });
+
+/**
+ * F16: Telegram message ids are only unique within a chat, not across the platform.
+ * Driven through syncEventToSQLite (not raw INSERT) so the test exercises the real
+ * landing path rather than an internal helper.
+ */
+describe("F16: per-chat message identity", () => {
+  let db: Database;
+
+  const makeMessage = (chatPlatformId: string, messageId: string, text: string): JsonlEvent => ({
+    type: "message",
+    platform: "telegram",
+    platform_message_id: messageId,
+    chat: { platform_id: chatPlatformId, type: "direct", name: `Chat ${chatPlatformId}` },
+    sender: { platform_id: "u_001", display_name: "Sender" },
+    timestamp: 1690000000000,
+    content: { type: "text", text },
+    raw: {},
+    source: "live",
+  });
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("same platform_message_id in two different chats: both rows must exist", () => {
+    syncEventToSQLite(db, makeMessage("chat_A", "20445", "A 室的訊息"));
+    syncEventToSQLite(db, makeMessage("chat_B", "20445", "B 室的訊息"));
+
+    const rows = db.query<{ chat_id: number; content_text: string }, [string]>(
+      `SELECT m.chat_id, m.content_text FROM messages m WHERE m.platform_message_id = ? ORDER BY m.id`
+    ).all("20445");
+
+    expect(rows.length).toBe(2);
+
+    const chatA = db.query<{ id: number }, [string]>(
+      "SELECT id FROM chats WHERE platform_id = ?"
+    ).get("chat_A")!.id;
+    const chatB = db.query<{ id: number }, [string]>(
+      "SELECT id FROM chats WHERE platform_id = ?"
+    ).get("chat_B")!.id;
+
+    expect(rows[0].chat_id).toBe(chatA);
+    expect(rows[0].content_text).toBe("A 室的訊息");
+    expect(rows[1].chat_id).toBe(chatB);
+    expect(rows[1].content_text).toBe("B 室的訊息");
+  });
+  test("unsend addressed to chat A must not retract chat B's same-id message", () => {
+    // Only B lands a row: pre-fix schema is platform-global, so a second row would be
+    // swallowed anyway. The bug under test is findTarget having no chat scope.
+    syncEventToSQLite(db, makeMessage("chat_B", "20445", "B 室的訊息"));
+
+    const before = db.query<{ id: number; content_text: string | null; seq: number; retracted_at: number | null }, [string]>(
+      "SELECT id, content_text, seq, retracted_at FROM messages WHERE platform_message_id = ?"
+    ).get("20445")!;
+
+    // chat_A has no message 20445 of its own.
+    syncEventToSQLite(db, {
+      type: "unsend",
+      platform: "telegram",
+      platform_message_id: "20445",
+      chat: { platform_id: "chat_A", type: "direct", name: "Chat chat_A" },
+      timestamp: 1690000005000,
+      raw: {},
+      source: "live",
+    } as unknown as JsonlEvent);
+
+    const after = db.query<{ id: number; content_text: string | null; seq: number; retracted_at: number | null }, [string]>(
+      "SELECT id, content_text, seq, retracted_at FROM messages WHERE platform_message_id = ?"
+    ).get("20445")!;
+
+    expect(after.content_text).toBe(before.content_text);
+    expect(after.retracted_at).toBeNull();
+    expect(after.seq).toBe(before.seq);
+  });
+  test("a failing message insert must not advance chats.last_message_at", () => {
+    syncEventToSQLite(db, { ...makeMessage("chat_A", "1", "第一則"), timestamp: 1000 });
+
+    const before = db.query<{ last_message_at: number }, [string]>(
+      "SELECT last_message_at FROM chats WHERE platform_id = ?"
+    ).get("chat_A")!.last_message_at;
+    expect(before).toBe(1000);
+
+    // INSERT OR IGNORE swallows CHECK violations too, so a bad `source` would not throw. A
+    // circular `raw` blows up in JSON.stringify instead — inside the transaction, after the
+    // chat upsert has already moved last_message_at.
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const poisoned = {
+      ...makeMessage("chat_A", "2", "第二則"),
+      timestamp: 9999,
+      raw: circular,
+    } as unknown as JsonlEvent;
+
+    expect(() => syncEventToSQLite(db, poisoned)).toThrow();
+
+    const after = db.query<{ last_message_at: number }, [string]>(
+      "SELECT last_message_at FROM chats WHERE platform_id = ?"
+    ).get("chat_A")!.last_message_at;
+    expect(after).toBe(before);
+
+    expect(db.query("SELECT id FROM messages").all().length).toBe(1);
+  });
+
+  test("swallowed insert warns; genuine dedup within a chat stays quiet", () => {
+    const warnings: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+
+    try {
+      // Genuine dedup: identical event twice in the SAME chat — must stay quiet.
+      syncEventToSQLite(db, makeMessage("chat_B", "20445", "B 室的訊息"));
+      syncEventToSQLite(db, makeMessage("chat_B", "20445", "B 室的訊息"));
+      expect(warnings.filter((w) => w.includes("20445"))).toEqual([]);
+
+      // Cross-chat collision: the row is silently dropped today — that must warn.
+      syncEventToSQLite(db, makeMessage("chat_A", "20445", "A 室的訊息"));
+      expect(warnings.filter((w) => w.includes("20445")).length).toBeGreaterThan(0);
+    } finally {
+      console.error = original;
+    }
+  });
+});

@@ -32,6 +32,10 @@ export interface LandEventDeps {
  *
  * notify 涵蓋 message / edit / unsend：三者都改變了 consumer 讀得到的 SQLite 狀態。
  * read_receipt 不改，仍不推播。
+ *
+ * key 含 chat：Telegram 的 message id 只在單一聊天室內唯一，兩個聊天室同時跑到同一個 id 是
+ * 常態。key 不含 chat 的話，B 室先落地就會讓 A 室 60 秒內的同 id 訊息被判成回吐而整則消失
+ * ——連 JSONL 都不會有。
  */
 const NOTIFYING_TYPES = new Set(["message", "edit", "unsend"]);
 
@@ -40,7 +44,7 @@ export function makeLandEvent(deps: LandEventDeps): (event: JsonlEvent) => boole
 
   return function landEvent(event: JsonlEvent): boolean {
     const deduped = event.type === "message";
-    const key = `${event.type}:${event.platform}:${event.platform_message_id}`;
+    const key = `${event.type}:${event.platform}:${event.chat?.platform_id}:${event.platform_message_id}`;
     const now = Date.now();
     for (const [k, t] of landedKeys) if (now - t > LANDED_TTL_MS) landedKeys.delete(k);
     if (deduped) {

@@ -128,13 +128,28 @@ interface ChangeTarget {
   retracted_at: number | null;
 }
 
+/**
+ * Scoped to the chat the event names. Platform message ids are only unique within a chat on
+ * Telegram, so an unscoped lookup can tombstone an unrelated chat's message. When the chat is
+ * unknown we refuse rather than fall back to a global lookup: not acting is honest, acting on
+ * a guessed chat is silent data loss.
+ */
 function findTarget(db: Database, event: JsonlEvent): ChangeTarget | null {
+  const chatPlatformId = event.chat?.platform_id;
+  if (!chatPlatformId) {
+    console.error(
+      `[storage] WARN: ${event.type} for ${event.platform}:${event.platform_message_id} carries no chat.platform_id — not applied`
+    );
+    return null;
+  }
+
   return db
-    .query<ChangeTarget, [string, string]>(
-      `SELECT id, content_text, edited_at, retracted_at FROM messages
-       WHERE platform = ? AND platform_message_id = ?`
+    .query<ChangeTarget, [string, string, string]>(
+      `SELECT m.id, m.content_text, m.edited_at, m.retracted_at FROM messages m
+       JOIN chats c ON c.id = m.chat_id
+       WHERE m.platform = ? AND m.platform_message_id = ? AND c.platform_id = ?`
     )
-    .get(event.platform, event.platform_message_id);
+    .get(event.platform, event.platform_message_id, chatPlatformId);
 }
 
 /**
@@ -144,11 +159,11 @@ function findTarget(db: Database, event: JsonlEvent): ChangeTarget | null {
 function applyEdit(db: Database, event: JsonlEvent): void {
   const target = findTarget(db, event);
   if (!target) {
-    console.error(`[storage] WARN: edit for unknown message ${event.platform}:${event.platform_message_id} — ignored`);
+    console.error(`[storage] WARN: edit for unknown message ${event.platform}:${event.platform_message_id} in chat ${event.chat?.platform_id} — ignored`);
     return;
   }
   if (target.retracted_at != null) {
-    console.error(`[storage] WARN: edit for retracted message ${event.platform}:${event.platform_message_id} — refused`);
+    console.error(`[storage] WARN: edit for retracted message ${event.platform}:${event.platform_message_id} in chat ${event.chat?.platform_id} — refused`);
     return;
   }
 
@@ -165,7 +180,7 @@ function applyEdit(db: Database, event: JsonlEvent): void {
 function applyUnsend(db: Database, event: JsonlEvent): void {
   const target = findTarget(db, event);
   if (!target) {
-    console.error(`[storage] WARN: unsend for unknown message ${event.platform}:${event.platform_message_id} — ignored`);
+    console.error(`[storage] WARN: unsend for unknown message ${event.platform}:${event.platform_message_id} in chat ${event.chat?.platform_id} — ignored`);
     return;
   }
   if (target.retracted_at != null) return;
@@ -186,6 +201,21 @@ export function syncEventToSQLite(db: Database, event: JsonlEvent): void {
   if (event.type === "unsend") return applyUnsend(db, event);
   if (event.type !== "message") return;
 
+  // Contact, chat and message land together or not at all. Landing the chat on its own is what
+  // made F16 invisible: `last_message_at` moved forward while the message row was dropped, so
+  // the chat list sorted on a message nobody could open. Whatever makes the insert fail in the
+  // future, the sort key must not advance without it.
+  const swallowed = db.transaction(() => landMessage(db, event))();
+
+  if (swallowed) {
+    console.error(
+      `[storage] WARN: message ${event.platform}:${event.platform_message_id} not inserted into chat ${event.chat.platform_id} — an id collision outside this chat swallowed it`
+    );
+  }
+}
+
+/** Returns true when the row was silently dropped by something outside this chat. */
+function landMessage(db: Database, event: JsonlEvent): boolean {
   const upsertContact = db.prepare(`
     INSERT INTO contacts (platform, platform_id, display_name)
     VALUES (?, ?, ?)
@@ -226,12 +256,12 @@ export function syncEventToSQLite(db: Database, event: JsonlEvent): void {
     "SELECT id FROM chats WHERE platform = ? AND platform_id = ?"
   ).get(event.platform, event.chat.platform_id)!.id;
 
-  const insertMessage = db.prepare(`
+  const insertMessageStmt = db.prepare(`
     INSERT OR IGNORE INTO messages
     (platform, platform_message_id, chat_id, sender_id, timestamp, content_type, content_text, content_media_url, raw, source, seq)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_SEQ})
   `);
-  insertMessage.run(
+  const { changes } = insertMessageStmt.run(
     event.platform,
     event.platform_message_id,
     chatId,
@@ -243,4 +273,16 @@ export function syncEventToSQLite(db: Database, event: JsonlEvent): void {
     JSON.stringify(event.raw),
     event.source
   );
+
+  if (changes > 0) return false;
+
+  // `changes === 0` conflates two things: a genuine re-delivery of a message this chat already
+  // has (routine — syncCheck replays the JSONL tail on every restart), and a row swallowed by
+  // something outside this chat (the F16 bug, historically silent). Only the second is worth a
+  // line, so ask whether the chat actually ended up with the message.
+  const present = db.query<{ id: number }, [string, string, number]>(
+    "SELECT id FROM messages WHERE platform = ? AND platform_message_id = ? AND chat_id = ?"
+  ).get(event.platform, event.platform_message_id, chatId);
+
+  return !present;
 }

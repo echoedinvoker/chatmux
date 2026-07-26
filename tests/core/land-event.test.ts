@@ -54,6 +54,31 @@ describe("landEvent", () => {
     expect(notified).toEqual(["line:c1"]);
   });
 
+  test("same message id in two different chats: both land (F16)", () => {
+    const { appended, synced, notified, deps } = makeDeps();
+    const landEvent = makeLandEvent(deps);
+
+    const inChat = (chatId: string) =>
+      makeEvent({ platform: "telegram", platform_message_id: "20445", chat: { platform_id: chatId, type: "direct" } });
+
+    expect(landEvent(inChat("chat_A"))).toBe(true);
+    expect(landEvent(inChat("chat_B"))).toBe(true);
+
+    expect(appended.length).toBe(2);
+    expect(synced.length).toBe(2);
+    expect(notified).toEqual(["telegram:chat_A", "telegram:chat_B"]);
+  });
+
+  test("same message id in the same chat still dedupes (F16 must not widen the key too far)", () => {
+    const { appended, deps } = makeDeps();
+    const landEvent = makeLandEvent(deps);
+
+    const evt = makeEvent({ platform: "telegram", platform_message_id: "20445", chat: { platform_id: "chat_A", type: "direct" } });
+    expect(landEvent(evt)).toBe(true);
+    expect(landEvent(evt)).toBe(false);
+    expect(appended.length).toBe(1);
+  });
+
   test("restores the key when JSONL append throws, and rethrows", () => {
     const { deps } = makeDeps({ appendThrows: true });
     const landEvent = makeLandEvent(deps);
