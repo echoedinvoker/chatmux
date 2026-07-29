@@ -305,5 +305,101 @@ describe("ConnectionManager", () => {
     await sleep(50);
 
     expect(states.includes("killed")).toBe(true);
+    // `killed` is terminal: the consume loop unwinding afterwards must not
+    // demote it back to `reconnecting`.
+    expect(states.at(-1)).toBe("killed");
+  });
+
+  it("demotes to reconnecting when the stream dies, instead of silently renewing", async () => {
+    // Real shape: initLegyPusher never resolves, so pushLoop cannot re-declare
+    // connected. Recovery has to come from stream evidence.
+    const realistic = createMockPushSource({
+      initBehavior: () => new Promise<void>(() => {}),
+    });
+    const states: ConnectionState[] = [];
+    const mgr = new ConnectionManager(realistic, TEST_OPTS);
+    mgr.onStateChange((s) => states.push(s));
+
+    mgr.start();
+    await sleep(20);
+    expect(states[0]).toBe("connected");
+
+    realistic.errorStream(new Error("boom"));
+    // errorStream() drops the controller, so the revival event has to wait for
+    // consumeLoop to renew the stream before it has anywhere to land.
+    await sleep(40);
+    realistic.enqueue({ type: "SEND_MESSAGE", text: "revived" });
+    await sleep(40);
+
+    const reconnIdx = states.indexOf("reconnecting");
+    expect(reconnIdx).toBeGreaterThan(0);
+    expect(states.slice(reconnIdx + 1).includes("connected")).toBe(true);
+
+    conn.stop();
+  });
+
+  it("markStreamDead() demotes immediately and then reconnects", async () => {
+    const realistic = createMockPushSource({
+      initBehavior: () => new Promise<void>(() => {}),
+    });
+    const states: ConnectionState[] = [];
+    const mgr = new ConnectionManager(realistic, TEST_OPTS);
+    mgr.onStateChange((s) => states.push(s));
+
+    mgr.start();
+    await sleep(20);
+    expect(states.at(-1)).toBe("connected");
+
+    mgr.markStreamDead("push-stream-failure");
+    expect(states.at(-1)).toBe("reconnecting");
+
+    await sleep(40);
+    realistic.enqueue({ type: "SEND_MESSAGE", text: "revived" });
+    await sleep(80);
+    expect(states.at(-1)).toBe("connected");
+
+    mgr.stop();
+  });
+
+  it("advances the liveness timestamp only on real evidence", async () => {
+    let clock = 1_000_000;
+    const mgr = new ConnectionManager(push, { ...TEST_OPTS, now: () => clock });
+
+    mgr.start();
+    await sleep(20);
+    const afterConnect = mgr.lastLivenessEvidenceAt;
+
+    clock = 2_000_000;
+    push.enqueue({ type: "SEND_MESSAGE", text: "hi" });
+    await sleep(40);
+
+    expect(mgr.lastLivenessEvidenceAt).toBe(2_000_000);
+    expect(afterConnect).not.toBe(2_000_000);
+
+    mgr.stop();
+  });
+
+  it("returns to connected on real stream evidence, even when initLegyPusher never resolves", async () => {
+    // Copy the real linejs shape: initLegyPusher goes in and never comes back.
+    const realistic = createMockPushSource({
+      initBehavior: () => new Promise<void>(() => {}),
+    });
+    const states: ConnectionState[] = [];
+    const mgr = new ConnectionManager(realistic, TEST_OPTS);
+    mgr.onStateChange((s) => states.push(s));
+
+    mgr.start();
+    await sleep(20);
+    expect(states.at(-1)).toBe("connected");
+
+    mgr.markStreamDead("suspend-gap");
+    expect(states.at(-1)).toBe("reconnecting");
+
+    await sleep(60);
+    realistic.enqueue({ type: "SEND_MESSAGE", text: "back-alive" });
+    await sleep(60);
+
+    expect(states.at(-1)).toBe("connected");
+    mgr.stop();
   });
 });

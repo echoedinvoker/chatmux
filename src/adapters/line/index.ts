@@ -363,8 +363,9 @@ async function main(): Promise<void> {
       },
     };
 
-    resp.notify("status", { state: "connected" });
-
+    // No status announcement here: login succeeding says nothing about whether
+    // the push stream is up. Connection state is produced solely by
+    // ConnectionManager, from evidence.
     const push = createPushSource(client);
     connection = new ConnectionManager(push);
 

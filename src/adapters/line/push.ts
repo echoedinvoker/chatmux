@@ -106,20 +106,54 @@ export function createPushSource(client: Client): PushSource {
 export interface ConnectionManagerOptions {
   networkRetryMs?: number;
   streamRetryMs?: number;
+  now?: () => number;
 }
 
 export class ConnectionManager {
   private state: ConnectionState = "reconnecting";
-  private stateListeners: ((s: ConnectionState) => void)[] = [];
+  private stateListeners: ((
+    s: ConnectionState,
+    lastLivenessEvidenceAt: number | null,
+  ) => void)[] = [];
   private errorListeners: ((err: Error) => Promise<void>)[] = [];
   private eventListeners: ((event: any) => void)[] = [];
   private abortController: AbortController | null = null;
   private networkRetryMs: number;
   private streamRetryMs: number;
+  // consumeLoop parks on `await reader.read()`; without a handle on the reader
+  // there is no way to interrupt it from outside.
+  private currentReader: ReadableStreamDefaultReader<any> | null = null;
+  private now: () => number;
+  /**
+   * Last moment we had *evidence* the stream was alive. Only advanced by the
+   * stream actually producing data — never by a state change, which is exactly
+   * the lie this project removes.
+   */
+  lastLivenessEvidenceAt: number | null = null;
 
   constructor(private push: PushSource, opts?: ConnectionManagerOptions) {
     this.networkRetryMs = opts?.networkRetryMs ?? 5000;
     this.streamRetryMs = opts?.streamRetryMs ?? 1000;
+    this.now = opts?.now ?? Date.now;
+  }
+
+  private noteLivenessEvidence(): void {
+    this.lastLivenessEvidenceAt = this.now();
+    // The stream producing data is the only thing that earns `connected` back.
+    // pushLoop cannot do it: initLegyPusher never resolves in the real client,
+    // so it declares connected exactly once in its lifetime.
+    if (this.state !== "connected") this.setState("connected");
+  }
+
+  /**
+   * Declare the push stream dead from the outside (crash guard, suspend
+   * detector). Cancels the reader so consumeLoop unwinds; the renew is left to
+   * consumeLoop's existing path so the stream is rebuilt exactly once.
+   */
+  markStreamDead(reason: string): void {
+    console.error(`[LINE] push liveness: marked dead (${reason})`);
+    this.setState("reconnecting");
+    this.currentReader?.cancel().catch(() => {});
   }
 
   start(): void {
@@ -143,7 +177,9 @@ export class ConnectionManager {
     this.abortController = null;
   }
 
-  onStateChange(fn: (s: ConnectionState) => void): void {
+  onStateChange(
+    fn: (s: ConnectionState, lastLivenessEvidenceAt: number | null) => void,
+  ): void {
     this.stateListeners.push(fn);
   }
 
@@ -163,7 +199,7 @@ export class ConnectionManager {
   private setState(s: ConnectionState): void {
     if (this.state === s) return;
     this.state = s;
-    for (const fn of this.stateListeners) fn(s);
+    for (const fn of this.stateListeners) fn(s, this.lastLivenessEvidenceAt);
   }
 
   private async emitError(err: unknown): Promise<void> {
@@ -193,6 +229,7 @@ export class ConnectionManager {
   private async consumeLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
       const reader = this.push.stream.getReader();
+      this.currentReader = reader;
       const onAbort = () => {
         reader.cancel().catch(() => {});
       };
@@ -201,15 +238,24 @@ export class ConnectionManager {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          this.noteLivenessEvidence();
           for (const fn of this.eventListeners) fn(value);
         }
-      } catch {
-        // reader cancelled or stream error
+      } catch (err) {
+        console.error(
+          "[LINE] push liveness: stream ended/errored:",
+          err instanceof Error ? err.message : err,
+        );
       } finally {
         signal.removeEventListener("abort", onAbort);
         reader.releaseLock();
+        this.currentReader = null;
       }
       if (signal.aborted) return;
+      // Reached on both error and clean `done`: for a push stream, EOF is death,
+      // not a normal ending. Must stay *after* the aborted check — stop("killed")
+      // aborts, and demoting here would overwrite that terminal state.
+      this.setState("reconnecting");
       this.push.renew();
       await sleep(this.streamRetryMs, signal);
     }
