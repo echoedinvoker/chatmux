@@ -496,6 +496,39 @@ ingest paths behave identically.
 | `unsend`, target missing | Not applied, no row created, WARN |
 | `read_receipt`, unknown types | Early return, SQLite untouched |
 
+### Repairing a projection column from `raw`
+
+`src/core/storage/rederive.ts` recomputes projection columns for rows that landed before
+the adapter knew how to read a field — `content_text` when a content type was rendered as
+`[RICH]`, the sticker columns when the ids were still being dropped. Every row keeps the
+payload it was derived from in `raw`, so this is arithmetic on data already present, not a
+new fetch. `scripts/rederive-content.ts` is the CLI entry point; run it with the daemon
+stopped, and it calls `initSchema` itself so it does not depend on somebody having booted
+the daemon first to create the columns it writes into.
+
+Three rules, all load-bearing:
+
+- **Only SQLite is touched, never `events.jsonl`.** This is the one write path that
+  bypasses the log, and it is legitimate precisely because it changes nothing the log
+  records: the table is a derivative, and a repair makes it agree with what the log
+  already said. Rewriting the log to match a repaired projection would invert that.
+- **`seq` is not bumped.** `seq` is the cursor pull consumers page on. Bumping it would
+  re-deliver hundreds of messages as if their content had changed for the reader; nothing
+  changed for the reader, something was fixed for us.
+- **Core stays platform-neutral.** The candidate rows are selected by a platform-agnostic
+  condition and the *reader* is injected by the caller — `rederiveText(db, derive)`,
+  `rederiveStickers(db, extract)`. A reader returns null for a payload it does not
+  recognise and that row is left untouched, which is how one query can scan every
+  platform's rows without one adapter's vocabulary overwriting another's. Putting
+  `platform = 'line'` or `'[RICH]'` in these WHERE clauses would drag that coupling back
+  in through the query.
+
+A repair that must change *state* rather than wording goes through the same write the
+projection would have used. A backfilled retraction lands as `content_text = NULL` +
+`retracted_at`, identical to what `applyUnsend` writes — never as a literal string like
+`[訊息已收回]`, which no scan, count or later repair would ever match while looking, to a
+human reading the screen, exactly like the correct result.
+
 **Retraction is a tombstone, not a delete.** The row survives with its content cleared and
 `retracted_at` set. Deleting it outright would orphan the FTS `content_rowid` and the
 `attachments` foreign key, and would force the rebuild path to reproduce the deletion.

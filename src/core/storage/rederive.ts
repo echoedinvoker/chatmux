@@ -23,6 +23,74 @@ export interface RederiveStats {
   skipped: number;
 }
 
+export interface TextProjection {
+  /** `null` means the row holds no text at all — a retraction, not an empty string. */
+  text: string | null;
+  /**
+   * Set when the payload says the message was retracted before it ever reached us. The
+   * repair then has to change state, not wording, which is why this is a field and not a
+   * magic string the caller would have to recognise on the way back.
+   */
+  retracted_at?: number;
+}
+
+/**
+ * Repairs `content_text` on rows that landed as a bracketed placeholder.
+ *
+ * The candidate set is platform-neutral on purpose: `[RICH]`, `[CHATEVENT]` and the rest
+ * are one adapter's names, and putting them (or a `platform = 'line'` filter) in this
+ * WHERE would drag back exactly the coupling that passing `derive` as a parameter exists
+ * to avoid. Two guards make the wider scan safe, and both matter:
+ *
+ * - `derive` returns null for payloads it does not recognise, so another platform's
+ *   placeholders are left alone rather than rewritten by the wrong reader.
+ * - a projection equal to what is already stored is not an update. Deliberate labels
+ *   (`[Flex]`, `[圖片]`) map back to themselves and drop out for free, and idempotency
+ *   falls out of the same rule instead of needing its own bookkeeping.
+ */
+export function rederiveText(
+  db: Database,
+  derive: (raw: unknown) => TextProjection | null,
+): RederiveStats {
+  const rows = db
+    .query<{ id: number; raw: string | null; content_text: string | null }, []>(
+      "SELECT id, raw, content_text FROM messages WHERE content_text LIKE '[%]'",
+    )
+    .all();
+
+  const update = db.prepare("UPDATE messages SET content_text = ? WHERE id = ?");
+  // Same columns `applyUnsend` clears, so a retraction found in a backfilled payload is
+  // indistinguishable from one that arrived as a live event.
+  const retract = db.prepare(
+    "UPDATE messages SET content_text = NULL, content_media_url = NULL, retracted_at = ? WHERE id = ?",
+  );
+
+  const stats: RederiveStats = { scanned: rows.length, updated: 0, skipped: 0 };
+
+  for (const row of rows) {
+    let projection: TextProjection | null = null;
+    try {
+      projection = row.raw == null ? null : derive(JSON.parse(row.raw));
+    } catch {
+      projection = null;
+    }
+
+    if (!projection || (projection.retracted_at == null && projection.text === row.content_text)) {
+      stats.skipped++;
+      continue;
+    }
+
+    if (projection.retracted_at != null) {
+      retract.run(projection.retracted_at, row.id);
+    } else {
+      update.run(projection.text, row.id);
+    }
+    stats.updated++;
+  }
+
+  return stats;
+}
+
 export interface StickerExtract {
   sticker_id: string;
   package_id?: string;

@@ -13,8 +13,8 @@ import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { initSchema } from "../src/core/storage/sqlite";
-import { rederiveStickers } from "../src/core/storage/rederive";
-import { extractSticker } from "../src/adapters/line/content-text";
+import { rederiveStickers, rederiveText } from "../src/core/storage/rederive";
+import { deriveProjection, extractSticker } from "../src/adapters/line/content-text";
 
 const dbPath =
   process.argv[2] ?? join(homedir(), ".local/share/chatmux/chatmux.db");
@@ -31,11 +31,15 @@ initSchema(db);
 // LINE's names for these fields, and core does not know any platform's metadata keys.
 // Rows it cannot read — Telegram's stickers, whose raw carries no sticker ID at all —
 // come back as `skipped`, which is the correct outcome, not a failure.
-const stats = rederiveStickers(db, extractSticker);
+const stickers = rederiveStickers(db, extractSticker);
+const texts = rederiveText(db, deriveProjection);
 
 console.log(`db: ${dbPath}`);
 console.log(
-  `stickers: scanned=${stats.scanned} updated=${stats.updated} skipped=${stats.skipped}`,
+  `stickers: scanned=${stickers.scanned} updated=${stickers.updated} skipped=${stickers.skipped}`,
+);
+console.log(
+  `texts: scanned=${texts.scanned} updated=${texts.updated} skipped=${texts.skipped}`,
 );
 
 db.close();

@@ -1,3 +1,11 @@
+import {
+  CONTENT_TYPE_LABELS,
+  isRetraction,
+  resolveContentText,
+  resolveContentType,
+  retractionTimestamp,
+} from "./content-text.js";
+
 export interface RawMessage {
   from: string;
   to: string;
@@ -45,11 +53,12 @@ export interface OpObservation {
 
 // 狀態類 op：要連完整結構一起 dump 才能反推 thrift param 對應。
 // ⚠️ 只放具名的少數幾個——全量 dump 會撞 journald rate limit。
-const DUMP_OP_TYPES = new Set([
-  "DESTROY_MESSAGE",
-  "NOTIFIED_DESTROY_MESSAGE",
-  "NOTIFIED_SEND_REACTION",
-]);
+// The two DESTROY_MESSAGE entries came off this list once their param layout was pinned
+// down (param1 = chat mid, param2 = message id) and the unsend path was built on it — a
+// dump that has already told you what it knows is just noise competing for journald's
+// rate limit. NOTIFIED_SEND_REACTION stays: reactions have no projection at all yet (F31),
+// so its shape is still unknown and this is the only place it is visible.
+const DUMP_OP_TYPES = new Set(["NOTIFIED_SEND_REACTION"]);
 
 export type OpObserver = (observation: OpObservation) => void;
 
@@ -97,27 +106,6 @@ export interface AdapterUnsendEvent {
 /** 保留舊名稱當 union，讓下游 import 不必全改 */
 export type AdapterEvent = AdapterMessageEvent | AdapterUnsendEvent;
 
-const CONTENT_TYPE_MAP: Record<number | string, string> = {
-  0: "text", NONE: "text",
-  1: "image", IMAGE: "image",
-  2: "video", VIDEO: "video",
-  3: "audio", AUDIO: "audio",
-  7: "sticker", STICKER: "sticker",
-  14: "file", FILE: "file",
-};
-
-const CONTENT_TYPE_LABELS: Record<number | string, string> = {
-  1: "[圖片]", IMAGE: "[圖片]",
-  2: "[影片]", VIDEO: "[影片]",
-  3: "[語音]", AUDIO: "[語音]",
-  6: "[通話]", CALL: "[通話]",
-  7: "[貼圖]", STICKER: "[貼圖]",
-  13: "[聯絡人]", CONTACT: "[聯絡人]",
-  14: "[檔案]", FILE: "[檔案]",
-  15: "[位置]", LOCATION: "[位置]",
-  22: "[Flex]", FLEX: "[Flex]",
-};
-
 const MESSAGE_OP_TYPES = new Set([
   25, "SEND_MESSAGE",
   26, "RECEIVE_MESSAGE",
@@ -163,16 +151,29 @@ function resolveChatId(msg: RawMessage, myMid: string): string {
   return msg.from === myMid ? msg.to : msg.from;
 }
 
-function resolveContentType(contentType: number | string): string {
-  return CONTENT_TYPE_MAP[contentType] ?? "text";
-}
+/**
+ * F13/Phase 4.1: a backfilled message that LINE already knows was retracted.
+ *
+ * Returned alongside the message event rather than instead of it, because the row this
+ * retraction targets is the one the same backfill is about to create. Core drops an
+ * unsend whose target does not exist (adapter-protocol.md:529, "no ghost row is
+ * created") — sending only the unsend would not render the message as retracted, it
+ * would leave a hole in the timeline where the message used to be.
+ */
+function retractionFor(msg: RawMessage, myMid: string, raw: unknown): AdapterUnsendEvent | null {
+  if (!isRetraction(msg)) return null;
 
-function resolveContentText(msg: RawMessage): string {
-  const mapped = resolveContentType(msg.contentType);
-  if (mapped === "text") {
-    return msg.text || CONTENT_TYPE_LABELS[msg.contentType] || `[${msg.contentType}]`;
-  }
-  return msg.text || "";
+  return {
+    type: "unsend",
+    platform: "line",
+    platform_message_id: msg.id,
+    chat: {
+      platform_id: resolveChatId(msg, myMid),
+      type: isGroup(msg.toType) ? "group" : "direct",
+    },
+    timestamp: retractionTimestamp(msg) ?? Number(msg.createdTime),
+    raw,
+  };
 }
 
 function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterMessageEvent {
@@ -252,7 +253,10 @@ export async function handleOp(
 
   try {
     const decrypted = await client.decryptMessage(msg);
-    return msgToEvent(decrypted, client.myMid, msg);
+    // Live path only: the target row already exists (the message arrived before it was
+    // retracted), so the state change alone is the whole story. Backfill is the one that
+    // has to materialise the row first — see handleBackfill.
+    return retractionFor(decrypted, client.myMid, msg) ?? msgToEvent(decrypted, client.myMid, msg);
   } catch {
     return {
       type: "message",
@@ -317,7 +321,11 @@ export interface BackfillParams {
 }
 
 export interface BackfillResult {
-  events: AdapterMessageEvent[];
+  /**
+   * Not `AdapterMessageEvent[]`: a retracted message replays as a pair — the message that
+   * creates the row, then the unsend that tombstones it (Phase 4.1).
+   */
+  events: AdapterEvent[];
   has_more: boolean;
   oldest_timestamp: number;
 }
@@ -337,11 +345,15 @@ export async function handleBackfill(
     before,
   );
 
-  const events: AdapterMessageEvent[] = [];
+  const events: AdapterEvent[] = [];
   for (const raw of rawMessages) {
     try {
       const decrypted = await client.decryptMessage(raw);
       events.push(msgToEvent(decrypted, client.myMid, raw));
+      // Order matters and the sort below preserves it: UPDATED_TIME is later than
+      // createdTime, and equal timestamps keep insertion order (Array#sort is stable).
+      const retraction = retractionFor(decrypted, client.myMid, raw);
+      if (retraction) events.push(retraction);
     } catch {
       events.push({
         type: "message",

@@ -590,8 +590,9 @@ describe("handleBackfill", () => {
       count: 50,
     });
 
-    expect(result.events[0].sender.platform_id).toBe("u_me_mid_12345");
-    expect(result.events[1].sender.platform_id).toBe("u_friend");
+    const sent = result.events as AdapterMessageEvent[];
+    expect(sent[0].sender.platform_id).toBe("u_me_mid_12345");
+    expect(sent[1].sender.platform_id).toBe("u_friend");
   });
 });
 
@@ -732,5 +733,159 @@ describe("msgToEvent — 貼圖欄位（Phase 3.2）", () => {
 
     expect(ev!.content.sticker_id).toBe("1");
     expect("package_id" in ev!.content).toBe(false);
+  });
+});
+
+// ── Phase 4.1（F13）：resolveContentText 依 metadata 分流 ──────────────
+// 映射依 Phase 1.3 定案表（[RICH] 756 / [CHATEVENT] 21 / [NONE] 13）。
+// ⚠️ R12：NONE + UNSENT 這一支產的是 retraction，不是文字。斷言事件型別，
+// 不要斷言 content.text——產字面字串會讓缺陷對每個偵測器隱形。
+describe("resolveContentText — 語意 placeholder 分流（Phase 4.1）", () => {
+  const stubClient = createMockClient();
+
+  const msgWith = (contentType: string, meta: Record<string, string>, text = "") => ({
+    type: "RECEIVE_MESSAGE",
+    message: {
+      from: "uOTHER",
+      to: "cAAA",
+      toType: "GROUP",
+      id: "1",
+      createdTime: 1n,
+      text,
+      contentType,
+      contentMetadata: meta,
+    },
+  });
+
+  it("RICH 顯示 ALT_TEXT 的真實文案", async () => {
+    const ev = (await handleOp(
+      msgWith("RICH", { ALT_TEXT: "◤200 點紅包◢ 限時活動" }),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+    expect(ev!.content.text).toBe("◤200 點紅包◢ 限時活動");
+  });
+
+  it("RICH 缺 ALT_TEXT 時退回可辨識的標籤而非 [RICH]", async () => {
+    const ev = (await handleOp(
+      msgWith("RICH", {}),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+    expect(ev!.content.text).toBe("[圖文訊息]");
+  });
+
+  it("CHATEVENT 依 LOC_KEY 語意化", async () => {
+    const ev = (await handleOp(
+      msgWith("CHATEVENT", { LOC_KEY: "C_ML", LOC_ARGS: "uX" }),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+    expect(ev!.content.text).toBe("[系統：成員離開]");
+  });
+
+  // 不猜語意：推不定就保留原代號。一個看起來正確的錯誤中文標籤比 [CHATEVENT] 更糟。
+  it("未知的 LOC_KEY 保留原代號，不猜中文", async () => {
+    const ev = (await handleOp(
+      msgWith("CHATEVENT", { LOC_KEY: "C_ZZ" }),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+    expect(ev!.content.text).toBe("[系統：C_ZZ]");
+  });
+
+  it("NONE + UNSENT 產出 unsend 事件而非文字 placeholder", async () => {
+    const ev = await handleOp(
+      msgWith("NONE", { UNSENT: "true", UPDATED_TIME: "1784621248047" }),
+      stubClient,
+      () => {},
+    );
+    expect(ev!.type).toBe("unsend");
+    expect((ev as any).content).toBeUndefined();
+    expect(ev!.timestamp).toBe(1784621248047);
+  });
+
+  it("NONE + e2eeMark 標成無法解密", async () => {
+    const ev = (await handleOp(
+      msgWith("NONE", { e2eeMark: "2" }),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+    expect(ev!.content.text).toBe("[無法解密]");
+  });
+
+  // Phase 1.3 實測：計畫原本以為「成因未明」的 3 筆也是 e2ee，只是沒有 e2eeMark
+  // 這個 key，而是 raw 頂層的 e2eeVersion。只看 e2eeMark 會漏掉它們，
+  // 回填後仍是 [NONE]，4.4 的歸零 SQL 直接不過。
+  it("NONE + e2eeVersion（無 e2eeMark）同樣標成無法解密", async () => {
+    const op = msgWith("NONE", {});
+    (op.message as any).e2eeVersion = "2";
+    const ev = (await handleOp(op, stubClient, () => {})) as AdapterMessageEvent | null;
+    expect(ev!.content.text).toBe("[無法解密]");
+  });
+
+  it("未知 contentType 仍走原兜底，不被吞掉", async () => {
+    const ev = (await handleOp(
+      msgWith("BRANDNEW", {}),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+    expect(ev!.content.text).toBe("[BRANDNEW]");
+  });
+});
+
+// ── Phase 4.1 追加（見「問題與變更紀錄」2026-07-29 Step 4.1）────────────
+// backfill 的已收回訊息，其目標列就是 backfill 自己要建的。只發 unsend
+// ⇒ findTarget 找不到 ⇒ 依 adapter-protocol.md:529「no ghost row is created」
+// ⇒ 該則訊息在畫面上不是「已收回」，是整則不見。所以要發一對。
+describe("handleBackfill — 已收回訊息產出 message + unsend 一對（Phase 4.1）", () => {
+  const retractedRaw = {
+    from: "uOTHER",
+    to: "cAAA",
+    toType: "GROUP",
+    id: "m_unsent",
+    createdTime: 1784621000000n,
+    text: "",
+    contentType: "NONE",
+    contentMetadata: { UNSENT: "true", UPDATED_TIME: "1784621248047" },
+  };
+
+  it("先建列再 tombstone，順序不可顛倒", async () => {
+    const client = createMockClient({
+      async getPreviousMessages() {
+        return [retractedRaw as any];
+      },
+    });
+
+    const result = await handleBackfill(client, {
+      chat_id: "cAAA",
+      before_timestamp: 1790000000000,
+      count: 10,
+    });
+
+    expect(result.events).toHaveLength(2);
+    expect(result.events[0]!.type).toBe("message");
+    expect(result.events[0]!.platform_message_id).toBe("m_unsent");
+    expect(result.events[1]!.type).toBe("unsend");
+    expect(result.events[1]!.platform_message_id).toBe("m_unsent");
+    expect(result.events[1]!.chat.platform_id).toBe("cAAA");
+    expect(result.events[1]!.timestamp).toBe(1784621248047);
+  });
+
+  it("一般訊息仍只產一個事件", async () => {
+    const client = createMockClient({
+      async getPreviousMessages() {
+        return [{ ...retractedRaw, id: "m_plain", text: "hi", contentMetadata: {} } as any];
+      },
+    });
+
+    const result = await handleBackfill(client, {
+      chat_id: "cAAA",
+      before_timestamp: 1790000000000,
+      count: 10,
+    });
+
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]!.type).toBe("message");
   });
 });

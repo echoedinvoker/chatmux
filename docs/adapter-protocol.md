@@ -391,6 +391,29 @@ it silently returns messages core already has, the loop never joins back, and me
 arrived while core was offline are never fetched. That failure is invisible from the
 outside, which is why it is a MUST.
 
+#### A backfilled message may arrive with a change event attached
+
+`events` is not required to be messages only. When the platform replays a message it
+already knows was retracted, the adapter **SHOULD** emit two events for it — the `message`
+that creates the row, then the `unsend` that marks it retracted — rather than an `unsend`
+alone. Core ignores a change event whose target does not exist (see §change events), and
+for a backfilled retraction that target is the row the same batch is about to create; an
+unsend on its own therefore does not render as "retracted", it leaves a hole in the
+timeline where the message used to be.
+
+Two constraints make this safe to page over, and an adapter emitting pairs **MUST** keep
+both:
+
+- **The change event carries the same `platform_message_id` as its message** and a
+  timestamp no earlier than it. Core's paging picks the oldest event in the batch as the
+  next anchor, so a change event must never be able to become that anchor.
+- **The pair counts as two events against `count`.** Core treats `events.length` as a
+  request quota, not a row count, so returning fewer distinct messages than asked is
+  already legal; what is not legal is hiding the extra event from the array.
+
+LINE's backfill replays retracted messages as `contentType=NONE` with
+`contentMetadata.UNSENT="true"`, which is where this rule comes from.
+
 #### The anchor boundary may be inclusive or exclusive
 
 An adapter **MAY** treat `before_message_id` as inclusive (the anchor message itself is in
