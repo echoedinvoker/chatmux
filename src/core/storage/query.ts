@@ -277,6 +277,35 @@ export function getNewestMessageAnchor(
 }
 
 /**
+ * 這則訊息是否已經在 DB 裡。
+ *
+ * ⚠️ 三個欄位逐一對齊 `UNIQUE(platform, chat_id, platform_message_id)`，一個都不能少。
+ * 省略 chat 的話，Telegram 跨室重複的 message id（`migrateMessageUniqueKey` 註解記載的正是
+ * 這個坑）會讓 B 室已有的 id 把 A 室的**新**訊息判成「已存在」——在 JSONL 這一層那是
+ * 靜默資料遺失，truth source 從此沒有那一則。
+ *
+ * chat 還不存在（JOIN 不到）⇒ 回 false ⇒ 照常落地。
+ */
+export function hasMessage(
+  db: Database,
+  platform: string,
+  chatPlatformId: string,
+  platformMessageId: string
+): boolean {
+  const row = db
+    .query<{ one: number }, [string, string, string]>(
+      `SELECT 1 AS one
+       FROM messages m
+       JOIN chats c ON c.id = m.chat_id
+       WHERE m.platform = ? AND c.platform_id = ? AND m.platform_message_id = ?
+         AND c.platform = m.platform
+       LIMIT 1`
+    )
+    .get(platform, chatPlatformId, platformMessageId);
+  return row !== null;
+}
+
+/**
  * On-demand history paging (F4): anchor on the OLDEST known message and walk backwards.
  */
 export function buildHistoryBackfillParams(

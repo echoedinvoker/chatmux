@@ -398,9 +398,12 @@ row whether or not the index knows about it. Only a `MATCH` query goes through t
 Two things write here: an incoming event from an adapter, and core landing a message the
 user just sent (a successful `send_message` produces an event of its own). Both go through
 `landEvent` (`src/core/storage/land-event.ts`), which is where the deduplication below
-happens. Backfill bypasses it and appends directly — 500 backfilled events would flood the
-in-memory key map, and SQLite's `INSERT OR IGNORE` already covers that path. Both paths
-still share the ingest boundary (`src/core/ingest.ts`) above `landEvent`, so shape
+happens. Backfill does not: it goes through `landBackfillEvent`
+(`src/core/storage/land-backfill.ts`), which stays out of the in-memory key map — 500
+backfilled events would flood it — and instead asks SQLite whether the message is already
+there before writing anything. See [Backfill writes behind a
+read](#backfill-writes-behind-a-read) for why that path inverts the usual order. Both paths
+still share the ingest boundary (`src/core/ingest.ts`) above the landing function, so shape
 validation and per-event isolation apply to backfill too.
 
 ```
@@ -537,9 +540,43 @@ what let the per-platform unique key corrupt the chat list unnoticed for weeks.
 **Two layers, protecting different things.** SQLite is defended by `UNIQUE(platform, chat_id, platform_message_id)` + `INSERT OR IGNORE` and needs nothing else. JSONL is append-only with no constraint at all, so a duplicate there is permanent damage to the truth source — hence the in-memory check inside `landEvent`, before anything is written.
 - **The in-memory check guards `message` events only.** It exists for one race: core landing a message it just sent versus the platform echoing that same message back. Change events have no second source, so they never enter the map. Keying it by `type:platform:chat:platform_message_id` and applying it to everything looks safer but is worse — a Telegram `edit` reuses the edited message's ID, so a bot rewriting one message ten times in a minute would have nine of those edits swallowed with no row written and no log line. A genuinely duplicated `unsend` instead costs one extra JSONL line, and since applying it is idempotent the SQLite state is unchanged.
 - **A self-sent message can arrive twice**: once when core lands it after a successful send, once when the platform echoes it back as a live event (LINE does this; Telegram does not). Whichever arrives first lands it; the other is dropped with a `deduped echo` log line. The window between them is small and unpredictable — the echo travels the adapter's push connection while the send response travels the RPC channel — which is why the check lives at the shared entry point rather than at either caller.
-- **Backfill interleaving with a live event**: JSONL gets two lines, being append-only; SQLite gets one row, thanks to `INSERT OR IGNORE`. More JSONL lines than SQLite rows is normal and expected. Backfill moves hundreds of messages at a time and stays outside the in-memory check by design.
+- **Backfill interleaving with a live event**: the outcome depends on the order. Live first → the row is in SQLite by the time backfill re-fetches it, so `landBackfillEvent` suppresses the second JSONL line. Backfill first → the live path does not read SQLite, so JSONL gets two lines and SQLite one row. More JSONL lines than SQLite rows is therefore still normal, just no longer guaranteed in both directions. Backfill moves hundreds of messages at a time and stays outside the in-memory check by design.
 - **Counting rows in SQLite will not reveal duplicates.** `INSERT OR IGNORE` hides them. Verifying deduplication means counting lines in JSONL.
 - **Startup sync check**: replays the JSONL from the checkpoint in `sync_state` through the projection (`replayFrom`), which fills in any message SQLite is missing and re-applies any change event since the last run. It replays rather than checking for missing IDs because a change event alters an existing row instead of adding one, so an existence check would never notice a lost edit. Re-application is harmless: identical edits and repeat retractions short-circuit without moving `seq`. It never aborts startup. See [Replay checkpoint](#replay-checkpoint) for why the fixed 100-line tail it replaced lost data.
+
+### Backfill writes behind a read
+
+Everywhere else the order is fixed: append to JSONL, then project into SQLite. The truth
+source never depends on the view. **Backfill is the one exception — it reads the view first
+and skips the append when the message is already there.**
+
+The reason is that cold-start catch-up re-fetches the same history on every start. Each
+restart re-pulled batches the log already held, and the log is replayed on every start, so
+the cost compounded in two directions at once: disk, and startup time. Measured on
+2026-07-29, `events.jsonl` held 97,423 `message` lines for 9,966 distinct business keys —
+**9.78 lines per message**, with the live path contributing exactly one line each.
+
+Three things make the exception safe rather than merely cheap:
+
+- **The invariant runs one way only.** Every row in `messages` arrived through
+  `syncEventToSQLite`, and its only three callers — `landEvent`, `landBackfillEvent`, and
+  `replayFrom` — run *after* a JSONL line exists (`replayFrom` reads the log itself). So
+  "SQLite has this row" implies "JSONL has this line". Skipping the append can therefore
+  never remove a message from the truth source, and a rebuild from an empty database still
+  reconstructs the same projection.
+- **The check is the same question `INSERT OR IGNORE` already asks**, moved one step
+  earlier. It is not a heuristic: `hasMessage` (`src/core/storage/query.ts`) matches
+  `UNIQUE(platform, chat_id, platform_message_id)` column for column.
+- **It applies to `message` events on the backfill path only.** Other event types have no
+  row of this shape, and live events always write the log first.
+
+**The dangerous failure mode is a key that is too broad, not too narrow.** A duplicate line
+costs disk; a wrongly suppressed line means the message never existed in the truth source,
+silently. Drop `chat` from the key and Telegram's per-dialog message ids make one chat
+swallow another's messages — the same shape as the per-platform unique key bug above.
+`tests/core/land-backfill.test.ts` asserts each column of the key separately, in the
+"is not swallowed" direction.
+
 
 ## Capacity estimate
 

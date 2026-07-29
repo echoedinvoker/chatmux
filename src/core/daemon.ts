@@ -11,6 +11,7 @@ import { replayFrom } from "./storage/replay.js";
 import { upsertChatsFromAdapter, applyMessageBoxRecency, type AdapterChat } from "./storage/adapter-recency.js";
 import { initFTS } from "./storage/fts.js";
 import { makeLandEvent } from "./storage/land-event.js";
+import { makeLandBackfillEvent } from "./storage/land-backfill.js";
 import { makeIngestEvent } from "./ingest.js";
 import { SafetyRail } from "./safety.js";
 import { isMethodNotFound, type SpawnResult } from "./adapter-runner.js";
@@ -68,15 +69,15 @@ const landEvent = makeLandEvent({
   subscriptions,
 });
 
-// live 走 landEvent（含跨路徑去重）；backfill 維持原本的直寫，不進 dedup map
+// live 走 landEvent（含跨路徑去重）；backfill 走 landBackfillEvent，不進 dedup map
 // （量大會把 map 灌爆，且它本來就靠 SQLite 的 INSERT OR IGNORE）。
 const ingestLive = makeIngestEvent({ land: landEvent });
 const ingestBackfill = makeIngestEvent({
-  land: (event) => {
-    jsonl.append(event);
-    syncEventToSQLite(db, event);
-    return true;
-  },
+  land: makeLandBackfillEvent({
+    jsonl,
+    syncToSQLite: (event) => syncEventToSQLite(db, event),
+    db,
+  }),
 });
 
 const backfillDeps: BackfillDeps = {
