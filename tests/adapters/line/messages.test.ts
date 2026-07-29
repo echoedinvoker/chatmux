@@ -4,6 +4,7 @@ import {
   handleSendMessage,
   handleBackfill,
   type MessageClient,
+  type OpObservation,
 } from "../../../src/adapters/line/messages.js";
 
 function createMockClient(overrides?: Partial<MessageClient>): MessageClient {
@@ -131,6 +132,82 @@ describe("handleOp", () => {
     const event = await handleOp(op, client);
 
     expect(event).toBeNull();
+  });
+
+  // F23 1.2a: op observer — 兩個靜默丟棄點必須留下痕跡，且三類語意分開
+  it("F23: reports 'dropped' with the raw op.type for non-whitelisted ops", async () => {
+    const client = createMockClient();
+    const seen: OpObservation[] = [];
+    const op = makeOperation({ type: 55, from: "u_friend", to: "u_me" });
+
+    const event = await handleOp(op, client, (o) => seen.push(o));
+
+    expect(event).toBeNull();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].kind).toBe("dropped");
+    expect(seen[0].opType).toBe(55); // 原始字面值，不做映射（R8）
+  });
+
+  it("F23: reports 'kept' and returns the identical event (R5 regression)", async () => {
+    const client = createMockClient();
+    const seen: OpObservation[] = [];
+    const op = makeOperation({
+      type: 26,
+      from: "u_friend",
+      to: "u_me_mid_12345",
+      text: "你好",
+      id: "m_123",
+      createdTime: 1690000000000,
+    });
+
+    const withObserver = await handleOp(op, client, (o) => seen.push(o));
+    const withoutObserver = await handleOp(op, client);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].kind).toBe("kept");
+    expect(seen[0].opType).toBe(26);
+    // observer 不得改變回傳事件
+    expect(withObserver).toEqual(withoutObserver);
+  });
+
+  it("F23: reports 'dropped-no-msg' separately when op.message is absent", async () => {
+    const client = createMockClient();
+    const seen: OpObservation[] = [];
+    const op = { ...makeOperation({ type: 26 }), message: undefined };
+
+    const event = await handleOp(op, client, (o) => seen.push(o));
+
+    expect(event).toBeNull();
+    expect(seen).toHaveLength(1);
+    // 與 "dropped" 分開：這不是 H3，是另一個 bug（F25）
+    expect(seen[0].kind).toBe("dropped-no-msg");
+  });
+
+  it("F23: observation carries chat id and op createdTime for per-room correlation", async () => {
+    const client = createMockClient();
+    const seen: OpObservation[] = [];
+    const op = makeOperation({
+      type: 26,
+      from: "u_friend",
+      to: "c_group",
+      toType: 2,
+      createdTime: 1690000000000,
+    });
+
+    await handleOp(op, client, (o) => seen.push(o));
+
+    expect(seen[0].chatId).toBe("c_group"); // op.message.to ?? op.message.from
+    expect(String(seen[0].t)).toBe(String(1690000000000));
+  });
+
+  it("F23: falls back to '?' as chat id when the op carries no message", async () => {
+    const client = createMockClient();
+    const seen: OpObservation[] = [];
+    const op = { ...makeOperation({ type: 55 }), message: undefined };
+
+    await handleOp(op, client, (o) => seen.push(o));
+
+    expect(seen[0].chatId).toBe("?"); // 拿不到就印 ?，不猜
   });
 
   it("maps sticker contentType to sticker content", async () => {

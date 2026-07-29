@@ -485,3 +485,35 @@ export function handleGetStatus(db: Database, input: StatusInput): StatusOutput 
     },
   };
 }
+
+/**
+ * F23 探針：dev-only、唯讀。
+ *
+ * on-demand backfill 的 anchor 是該室**最舊**訊息（buildBackfillParams →
+ * getOldestMessageAnchor），所以它往更舊分頁，抓不到 F23 缺的那則「比最後落地
+ * 訊息更新」的訊息。此探針刻意**不帶 before_message_id**，讓 adapter fallback 到
+ * box.lastDeliveredMessageId → 回該室最新 N 則。
+ *
+ * 唯讀：events 原樣回傳，不 ingest（Phase 1 全程不寫 DB）。
+ */
+export interface ProbeDeps {
+  db: Database;
+  sendRequest: (platform: string, method: string, params: unknown) => Promise<unknown>;
+}
+
+export async function handleProbeLatest(
+  deps: ProbeDeps,
+  params: { chat_id: string; count: number },
+): Promise<{ events: unknown[] }> {
+  const [platform, ...rest] = params.chat_id.split(":");
+  const platformId = rest.join(":");
+
+  const result = await deps.sendRequest(platform, "backfill", {
+    chat_id: platformId,
+    before_timestamp: Date.now(),
+    count: params.count,
+    // before_message_id 刻意缺席 → adapter 走 box.lastDeliveredMessageId fallback
+  }) as { events: unknown[] };
+
+  return { events: result.events };
+}

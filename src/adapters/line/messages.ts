@@ -25,6 +25,20 @@ export interface MessageClient {
   ): Promise<RawMessage[]>;
 }
 
+// F23：handleOp 有兩個靜默丟棄點（非白名單 op、白名單但無 message），
+// 現場不留痕跡，三個假說因此都無法證偽。三種 kind 語意不同不可混為一類：
+// dropped = H3 的直接證據；dropped-no-msg = 另一個 bug（F25），不算 H3。
+export type OpObservationKind = "kept" | "dropped" | "dropped-no-msg";
+
+export interface OpObservation {
+  kind: OpObservationKind;
+  opType: unknown; // 原始字面值，不做映射（linejs 可能給數字或字串 enum）
+  chatId: string;
+  t: unknown;
+}
+
+export type OpObserver = (observation: OpObservation) => void;
+
 export interface AdapterEvent {
   type: string;
   platform: string;
@@ -128,12 +142,26 @@ function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterEvent 
 export async function handleOp(
   op: any,
   client: MessageClient,
+  observe?: OpObserver,
 ): Promise<AdapterEvent | null> {
   const opType = op.type;
-  if (!MESSAGE_OP_TYPES.has(opType)) return null;
+  const chatId = op.message?.to ?? op.message?.from ?? "?";
+  const report = (kind: OpObservationKind): void => {
+    observe?.({ kind, opType, chatId, t: op.createdTime });
+  };
+
+  if (!MESSAGE_OP_TYPES.has(opType)) {
+    report("dropped");
+    return null;
+  }
 
   const msg = op.message;
-  if (!msg) return null;
+  if (!msg) {
+    report("dropped-no-msg");
+    return null;
+  }
+
+  report("kept");
 
   try {
     const decrypted = await client.decryptMessage(msg);

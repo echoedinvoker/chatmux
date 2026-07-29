@@ -347,7 +347,9 @@ async function main(): Promise<void> {
     connection = new ConnectionManager(push);
 
     connection.onEvent(async (op: any) => {
-      const event = await handleOp(op, lineClient!);
+      const event = await handleOp(op, lineClient!, (o) => {
+        console.error(`[LINE] op ${o.kind}: ${o.opType} chat=${o.chatId} t=${o.t}`);
+      });
       if (event) {
         if (!event.sender.display_name) {
           event.sender.display_name = await enrichSenderName(

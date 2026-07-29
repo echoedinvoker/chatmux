@@ -24,7 +24,9 @@ import {
   handleSearchMessages,
   handleSendMessage,
   handleGetStatus,
+  handleProbeLatest,
   type SendDeps,
+  type ProbeDeps,
 } from "./mcp/tools.js";
 import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
 import { buildBackfillParams } from "./storage/query.js";
@@ -235,6 +237,26 @@ function registerTools(server: McpServer): void {
         },
       };
       const result = await handleSendMessage(deps, { chat_id, text });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  // F23 診斷探針（dev-only、唯讀）。on-demand backfill 的 anchor 在該室最舊訊息、
+  // 往回分頁，抓不到「比最後落地訊息更新」的缺口訊息；此探針不帶 before_message_id，
+  // 讓 adapter fallback 到 box.lastDeliveredMessageId → 回最新 N 則，且不 ingest。
+  server.tool(
+    "probe_latest",
+    "[F23 diagnostic, read-only] Ask the adapter for a chat's newest N messages without landing them",
+    {
+      chat_id: z.string().describe("Chat ID (e.g. 'line:c1234')"),
+      count: z.number().optional().default(20),
+    },
+    async ({ chat_id, count }) => {
+      const deps: ProbeDeps = {
+        db,
+        sendRequest: (platform, method, params) => manager.sendRequest(platform, method, params),
+      };
+      const result = await handleProbeLatest(deps, { chat_id, count });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
