@@ -564,6 +564,23 @@ Core compresses these three states into a boolean, so a `reconnecting` adapter
 surfaces through `get_status` and `chat://status` as `"disconnected"`. Those
 query APIs never emit the string `"reconnecting"`.
 
+**Adapters must re-send `status` on a throttle, not only when `state` changes.**
+Core has no way to poll for the timestamp, so an adapter that reports only on
+transitions leaves it frozen at whatever it was during the last transition — in
+the steady case (connected, events flowing) that is the moment of connection,
+possibly hours stale, or absent entirely. The LINE adapter re-emits at most once
+per `CHATMUX_F27_LIVENESS_REPORT_MS` (default 30s) whenever stream evidence
+arrives.
+
+**A long `disconnected` stretch does not by itself mean the connection is
+broken.** Only stream evidence promotes an adapter back to `connected`, so a
+genuinely healthy but idle chat account is reported the same way as a dead
+stream. This is deliberate — claiming `connected` without evidence is the
+failure this design removes — but it means consumers should treat
+`liveness_age_seconds` as the severity signal, not the state string alone.
+Distinguishing "quiet" from "broken" would need active probing, which no adapter
+currently does.
+
 ### `error`
 
 An internal adapter error.
