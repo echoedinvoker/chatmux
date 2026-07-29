@@ -335,6 +335,40 @@ describe("catch-up outcome persistence", () => {
     expect(results[0]!.batches).toBe(2);
     expect(readState("c_stall").catchup_state).toBe("gap-stalled");
   });
+
+  /**
+   * 觀測來源：2026-07-29 真實冷啟動，5 個 LINE 室被記成 gap-stalled，逐室對帳後
+   * 每室的「log 事件數 − DB 新列數」都恰好是 1，且都在第 2 批 ⇒ batch 2 只回了 anchor 自己。
+   *
+   * LINE 的 getPreviousMessages(endMessageId) 邊界是 inclusive 的，box 沒有更舊的就只回
+   * anchor。那是保留期限，不是分頁 bug——兩者收進同一個 outcome 就等於讓「平台不給了」
+   * 偽裝成「我們的分頁壞了」，正是這個迴圈存在的理由所要防的混淆。
+   */
+  test("an inclusive boundary with nothing older is no-older-available, not gap-stalled", async () => {
+    const chatId = insertChat(db, "c_inclusive", T0 + 100_000);
+    db.prepare("UPDATE chats SET last_message_at = ? WHERE id = ?").run(T0, chatId);
+    insertMessage(db, chatId, "i_000", T0);
+
+    const newest = [
+      makeEvent("c_inclusive", "i_010", T0 + 10_000),
+      makeEvent("c_inclusive", "i_011", T0 + 11_000),
+    ];
+    const sendRequest = async (_p: string, _m: string, params: unknown) => {
+      const anchor = (params as { before_message_id?: string }).before_message_id;
+      if (!anchor) return { events: newest };
+      // inclusive 邊界：沒有更舊的了，只回 anchor 那一則
+      return { events: [newest.find((e) => e.platform_message_id === anchor)!] };
+    };
+
+    const results = await catchUpAdapter(
+      { db, sendRequest, ingest: () => {}, log: () => {}, now: () => T0 + 500 },
+      "line",
+    );
+
+    expect(results[0]!.outcome).toBe("no-older-available");
+    expect(results[0]!.batches).toBe(2);
+    expect(readState("c_inclusive").catchup_state).toBe("no-older-available");
+  });
 });
 
 /**

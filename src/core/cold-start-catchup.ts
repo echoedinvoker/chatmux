@@ -14,14 +14,20 @@ export const MAX_CATCHUP_BATCHES = 3;
 /**
  * How a chat's catch-up ended. These are deliberately NOT collapsed into one bucket:
  * `gap-stalled` is paging being broken (a bug), `gap-not-closed` is the budget running out
- * (a capacity problem), and `not-in-message-boxes` is the platform never being asked properly.
+ * (a capacity problem), `no-older-available` is the platform refusing to go further back
+ * (a retention limit), and `not-in-message-boxes` is the platform never being asked properly.
  * One observation with several causes is exactly the trap this project exists to remove.
+ *
+ * `no-older-available` and `gap-not-closed` both mean the gap is still open; only the second
+ * is worth spending more budget on. Neither may be reported to the user as "this is
+ * everything" — that claim belongs to on-demand's `exhausted` and is not ours to make.
  */
 export type CatchupOutcome =
   | "joined"
   | "no-newer"
   | "gap-not-closed"
   | "gap-stalled"
+  | "no-older-available"
   | "not-in-message-boxes"
   | "failed";
 
@@ -184,9 +190,19 @@ export async function catchUpAdapter(
         if (oldest.timestamp <= newestKnown!.timestamp) return done("joined");
 
         if (cursorAnchor && oldest.platform_message_id === cursorAnchor.platform_message_id) {
-          // Paging is not advancing. That is a bug, not a budget problem — recording it as
-          // gap-not-closed would disguise a broken loop as "the hole was too big".
-          return done("gap-stalled");
+          // Paging is not advancing — but for two different reasons, and collapsing them would
+          // disguise a retention limit as a broken loop.
+          //
+          // LINE's getPreviousMessages(endMessageId) is INCLUSIVE of the anchor, so a message
+          // box holding nothing older answers with the anchor alone. That is the platform
+          // declining to go further back, not a bug. An adapter that returns a whole batch yet
+          // still nothing older than the anchor is misusing the boundary, and that IS a bug.
+          //
+          // Measured 2026-07-29: five LINE chats hit this branch, and every one of them had
+          // exactly one event in the second batch.
+          return events.length === 1
+            ? done("no-older-available")
+            : done("gap-stalled");
         }
 
         if (batches >= MAX_CATCHUP_BATCHES) return done("gap-not-closed", "max-batches");
