@@ -5,6 +5,7 @@ import {
   handleBackfill,
   type MessageClient,
   type OpObservation,
+  type AdapterMessageEvent,
 } from "../../../src/adapters/line/messages.js";
 
 function createMockClient(overrides?: Partial<MessageClient>): MessageClient {
@@ -70,7 +71,7 @@ describe("handleOp", () => {
       id: "m_123",
       createdTime: 1690000000000,
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event).not.toBeNull();
     expect(event!.type).toBe("message");
@@ -92,7 +93,7 @@ describe("handleOp", () => {
       to: "u_friend",
       text: "hey",
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event).not.toBeNull();
     expect(event!.sender.platform_id).toBe("u_me");
@@ -107,7 +108,7 @@ describe("handleOp", () => {
       to: "c_group",
       toType: 2,
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event!.chat.type).toBe("group");
     expect(event!.chat.platform_id).toBe("c_group");
@@ -121,7 +122,7 @@ describe("handleOp", () => {
       to: "c_group",
       toType: "GROUP",
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event!.chat.type).toBe("group");
   });
@@ -129,7 +130,7 @@ describe("handleOp", () => {
   it("returns null for non-message event types", async () => {
     const client = createMockClient();
     const op = makeOperation({ type: 0, text: "end" });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event).toBeNull();
   });
@@ -219,7 +220,7 @@ describe("handleOp", () => {
       contentType: 7,
       contentMetadata: { STKID: "12345" },
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event!.content.type).toBe("sticker");
     expect(event!.content.sticker_id).toBe("12345");
@@ -233,7 +234,7 @@ describe("handleOp", () => {
       to: "u_me",
       contentType: 1,
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event!.content.type).toBe("image");
   });
@@ -246,7 +247,7 @@ describe("handleOp", () => {
       to: "u_me",
       contentType: 2,
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event!.content.type).toBe("video");
   });
@@ -260,7 +261,7 @@ describe("handleOp", () => {
       contentType: 6,
       text: "",
     });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event!.content.type).toBe("text");
     expect(event!.content.text).toBe("[通話]");
@@ -275,7 +276,7 @@ describe("handleOp", () => {
       },
     });
     const op = makeOperation({ type: 26, from: "u_friend", to: "u_me" });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(decryptCalled).toBe(true);
     expect(event!.content.text).toBe("decrypted-text");
@@ -288,7 +289,7 @@ describe("handleOp", () => {
       },
     });
     const op = makeOperation({ type: 26, from: "u_friend", to: "u_me", id: "m_fail" });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event).not.toBeNull();
     expect(event!.content.text).toBe("[無法解密]");
@@ -298,7 +299,7 @@ describe("handleOp", () => {
   it("preserves raw data in event", async () => {
     const client = createMockClient();
     const op = makeOperation({ type: 26, from: "u_friend", to: "u_me" });
-    const event = await handleOp(op, client);
+    const event = (await handleOp(op, client)) as AdapterMessageEvent | null;
 
     expect(event!.raw).toBeDefined();
   });
@@ -628,5 +629,66 @@ describe("op observer dump（Phase 0.3）", () => {
 
     expect(seen[0].kind).toBe("dropped");
     expect(seen[0].raw).toBeUndefined();
+  });
+});
+
+describe("handleOp — unsend（F29：LINE 收回 op → unsend 事件）", () => {
+  const stubClient = createMockClient();
+
+  it("DESTROY_MESSAGE 產生 unsend 事件，不帶 sender/content", async () => {
+    const op = {
+      type: "DESTROY_MESSAGE",
+      param1: "cAAA",
+      param2: "623757041235919438",
+      param3: "0",
+      createdTime: 1785307616740,
+    };
+
+    const ev = await handleOp(op, stubClient, () => {});
+
+    expect(ev).not.toBeNull();
+    expect(ev!.type).toBe("unsend");
+    expect(ev!.platform).toBe("line");
+    expect(ev!.platform_message_id).toBe("623757041235919438");
+    expect(ev!.chat.platform_id).toBe("cAAA");
+    expect(ev!.timestamp).toBe(1785307616740);
+    expect((ev as any).sender).toBeUndefined();
+    expect((ev as any).content).toBeUndefined();
+  });
+
+  it("缺 chat 或 message id 的收回 op 不產生事件（寧可不做也不做錯）", async () => {
+    const op = { type: "DESTROY_MESSAGE", param1: "", param2: "", createdTime: 1 };
+    expect(await handleOp(op, stubClient, () => {})).toBeNull();
+  });
+
+  // 見計畫 2.1「⚠️ 不可污染 kept」——F23 的守恆檢查靠 kept 與訊息落地數 1:1
+  it("收回 op 報 kept-change，不算進 kept", async () => {
+    const seen: OpObservation[] = [];
+    await handleOp(
+      { type: "DESTROY_MESSAGE", param1: "cAAA", param2: "1", createdTime: 1 },
+      stubClient,
+      (o) => seen.push(o),
+    );
+    expect(seen[0].kind).toBe("kept-change");
+  });
+
+  it("既有 message 事件的形狀不受型別分家影響", async () => {
+    const op = {
+      type: "RECEIVE_MESSAGE",
+      message: {
+        from: "uOTHER",
+        to: "uSELF",
+        toType: "USER",
+        id: "1",
+        createdTime: 1n,
+        text: "hi",
+        contentType: "NONE",
+        contentMetadata: {},
+      },
+    };
+    const ev = await handleOp(op, stubClient, () => {});
+    expect(ev!.type).toBe("message");
+    expect((ev as any).sender.platform_id).toBe("uOTHER");
+    expect((ev as any).content.text).toBe("hi");
   });
 });

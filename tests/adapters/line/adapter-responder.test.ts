@@ -236,3 +236,40 @@ describe("AdapterResponder", () => {
     });
   });
 });
+
+describe("enrichEvent（F29：unsend 沒有 sender，不可無條件 enrich）", () => {
+  const cache: any = { getChat: () => ({ chatName: "群組A" }) };
+  const client: any = {};
+
+  it("unsend 事件不經過 sender enrichment，原樣通過", async () => {
+    const { enrichEvent } = await import("../../../src/adapters/line/index.js");
+    const ev: any = {
+      type: "unsend",
+      platform: "line",
+      platform_message_id: "123",
+      chat: { platform_id: "cAAA", type: "group" },
+      timestamp: 1,
+      raw: {},
+    };
+    const out: any = await enrichEvent(ev, cache, client);
+    expect(out).toBe(ev);
+    expect(out.sender).toBeUndefined();
+    expect(out.chat.name).toBeUndefined();
+  });
+
+  it("message 事件照舊補 chat.name", async () => {
+    const { enrichEvent } = await import("../../../src/adapters/line/index.js");
+    const ev: any = {
+      type: "message",
+      platform: "line",
+      platform_message_id: "1",
+      chat: { platform_id: "cAAA", type: "group" },
+      sender: { platform_id: "uX", display_name: "X" },
+      timestamp: 1,
+      content: { type: "text", text: "hi" },
+      raw: {},
+    };
+    const out = await enrichEvent(ev, cache, client);
+    expect(out.chat.name).toBe("群組A");
+  });
+});

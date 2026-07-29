@@ -2,7 +2,7 @@ import type { Writable, Readable } from "node:stream";
 import { createInterface } from "node:readline";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleOp, handleSendMessage, handleBackfill, type MessageClient } from "./messages.js";
+import { handleOp, handleSendMessage, handleBackfill, type MessageClient, type AdapterEvent } from "./messages.js";
 import { handleGetContacts, handleGetChats, ContactCache, enrichSenderName, type ContactClient } from "./contacts.js";
 import { login } from "./auth.js";
 import {
@@ -37,6 +37,11 @@ export function registerLineHandlers(responder: AdapterResponder, deps?: LineHan
   responder.onRequest("initialize", async (params: unknown) => {
     const caps: Capabilities = {
       platform: "line",
+      // ⚠️ 這個陣列有三項，本輪（F29，2026-07-29）兌現的**只有 `unsend`**。
+      // `read_receipt` 仍未實作：core 側 ingest.ts:159 已有處理邏輯在等（不是死碼，
+      // 是等米下鍋），但 adapter 側 `grep read_receipt\|READ_MESSAGE messages.ts` 零命中，
+      // LINE 的 NOTIFIED_READ_MESSAGE op 落在白名單外被當雜訊丟掉（F23 觀測窗內 126 次）。
+      // ⇒ 它是第二張空頭支票，形狀與 unsend 修之前一模一樣。見 F32。
       supported_events: ["message", "read_receipt", "unsend"],
       can_send: true,
       can_backfill: true,
@@ -181,6 +186,37 @@ export class AdapterResponder {
   }
 }
 
+/**
+ * 事件送出前的 enrichment（補 sender 顯示名、chat 名）。
+ *
+ * F29：unsend 事件沒有 `sender`／`content`（協定如此，見 docs/adapter-protocol.md:533），
+ * 無守衛地存取 `event.sender.display_name` 會直接 TypeError 打掛 adapter ⇒ 第一行就擋掉
+ * 非 message 事件。
+ *
+ * 抽成具名 export 的理由：這段邏輯原本只能靠跑起真的 daemon 才測得到，而 F11 的教訓
+ * 正是「測到函式 ≠ 測到呼叫」——抽出來讓它可測，`onEvent` 那行呼叫由 Phase 2.4 的端對端負責。
+ */
+export async function enrichEvent(
+  event: AdapterEvent,
+  contactCache: ContactCache,
+  lineClient: ContactClient,
+): Promise<AdapterEvent> {
+  if (event.type !== "message") return event;
+
+  if (!event.sender.display_name) {
+    event.sender.display_name = await enrichSenderName(
+      event.sender.platform_id,
+      contactCache,
+      lineClient,
+    );
+  }
+  if (!event.chat.name) {
+    const cachedChat = contactCache.getChat(event.chat.platform_id);
+    if (cachedChat) event.chat.name = cachedChat.chatName;
+  }
+  return event;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   main();
@@ -203,6 +239,11 @@ async function main(): Promise<void> {
 
     const caps: Capabilities = {
       platform: "line",
+      // ⚠️ 這個陣列有三項，本輪（F29，2026-07-29）兌現的**只有 `unsend`**。
+      // `read_receipt` 仍未實作：core 側 ingest.ts:159 已有處理邏輯在等（不是死碼，
+      // 是等米下鍋），但 adapter 側 `grep read_receipt\|READ_MESSAGE messages.ts` 零命中，
+      // LINE 的 NOTIFIED_READ_MESSAGE op 落在白名單外被當雜訊丟掉（F23 觀測窗內 126 次）。
+      // ⇒ 它是第二張空頭支票，形狀與 unsend 修之前一模一樣。見 F32。
       supported_events: ["message", "read_receipt", "unsend"],
       can_send: true,
       can_backfill: true,
@@ -401,18 +442,7 @@ async function main(): Promise<void> {
         }
       });
       if (event) {
-        if (!event.sender.display_name) {
-          event.sender.display_name = await enrichSenderName(
-            event.sender.platform_id,
-            contactCache,
-            lineClient!,
-          );
-        }
-        if (!event.chat.name) {
-          const cachedChat = contactCache.getChat(event.chat.platform_id);
-          if (cachedChat) event.chat.name = cachedChat.chatName;
-        }
-        resp.notify("event", event);
+        resp.notify("event", await enrichEvent(event, contactCache, lineClient!));
       }
     });
 

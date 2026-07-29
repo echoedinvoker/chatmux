@@ -26,9 +26,12 @@ export interface MessageClient {
 }
 
 // F23：handleOp 有兩個靜默丟棄點（非白名單 op、白名單但無 message），
-// 現場不留痕跡，三個假說因此都無法證偽。三種 kind 語意不同不可混為一類：
+// 現場不留痕跡，三個假說因此都無法證偽。四種 kind 語意不同不可混為一類：
 // dropped = H3 的直接證據；dropped-no-msg = 另一個 bug（F25），不算 H3。
-export type OpObservationKind = "kept" | "dropped" | "dropped-no-msg";
+// kept-change = F29 的狀態變更 op（收回）。⚠️ 不可併進 kept：F23 的守恆檢查是
+// 「kept 計數 : 訊息落地數 = 1:1」，而收回 op 被 kept 卻不產生新訊息，混進去
+// 會讓那個不變量從此靜默地對不上。
+export type OpObservationKind = "kept" | "dropped" | "dropped-no-msg" | "kept-change";
 
 export interface OpObservation {
   kind: OpObservationKind;
@@ -50,15 +53,17 @@ const DUMP_OP_TYPES = new Set([
 
 export type OpObserver = (observation: OpObservation) => void;
 
-export interface AdapterEvent {
-  type: string;
+export interface AdapterChat {
+  platform_id: string;
+  type: "direct" | "group" | "room";
+  name?: string;
+}
+
+export interface AdapterMessageEvent {
+  type: "message";
   platform: string;
   platform_message_id: string;
-  chat: {
-    platform_id: string;
-    type: "direct" | "group" | "room";
-    name?: string;
-  };
+  chat: AdapterChat;
   sender: {
     platform_id: string;
     display_name?: string;
@@ -73,6 +78,23 @@ export interface AdapterEvent {
   };
   raw: unknown;
 }
+
+/**
+ * F29：收回事件。依 docs/adapter-protocol.md:533，unsend 必須帶 platform_message_id
+ * 與 chat.platform_id，且**不得**帶 sender／content——core 的 applyUnsend
+ * （sqlite.ts:330-332）明文寫了 apply 函式不得讀 event.sender。
+ */
+export interface AdapterUnsendEvent {
+  type: "unsend";
+  platform: string;
+  platform_message_id: string;
+  chat: AdapterChat;
+  timestamp: number;
+  raw: unknown;
+}
+
+/** 保留舊名稱當 union，讓下游 import 不必全改 */
+export type AdapterEvent = AdapterMessageEvent | AdapterUnsendEvent;
 
 const CONTENT_TYPE_MAP: Record<number | string, string> = {
   0: "text", NONE: "text",
@@ -100,6 +122,37 @@ const MESSAGE_OP_TYPES = new Set([
   26, "RECEIVE_MESSAGE",
 ]);
 
+/**
+ * F29：收回類 op。⚠️ 只放 Phase 1.1 實地取樣過的型別。
+ * `NOTIFIED_DESTROY_MESSAGE`（他人收回）無法自行製造、觀測窗內未出現，
+ * param 排列未取樣 ⇒ 不外推，不放進來。
+ */
+const UNSEND_OP_TYPES = new Set(["DESTROY_MESSAGE"]);
+
+/**
+ * Phase 1.1 定案（兩個不同形狀的聊天室各取一樣本、逐欄比對實查值）：
+ *   param1 = chat mid（= chats.platform_id）、param2 = messageId、param3 = "0"（語意未知，不用）
+ */
+function destroyOpToUnsend(op: any): AdapterUnsendEvent | null {
+  const chatId = String(op.param1 ?? "");
+  const messageId = String(op.param2 ?? "");
+  if (!chatId || !messageId) return null;
+
+  return {
+    type: "unsend",
+    platform: "line",
+    platform_message_id: messageId,
+    chat: {
+      platform_id: chatId,
+      // core 的 findTarget 用 (platform, chat.platform_id, platform_message_id) 定位，
+      // 不讀 chat.type ⇒ 這欄猜錯不影響套用正確性。依 LINE 慣例 c/g 開頭為群組。
+      type: /^[cg]/.test(chatId) ? "group" : "direct",
+    },
+    timestamp: Number(op.createdTime ?? 0),
+    raw: op,
+  };
+}
+
 function isGroup(toType: number | string): boolean {
   return toType === 2 || toType === "GROUP";
 }
@@ -121,7 +174,7 @@ function resolveContentText(msg: RawMessage): string {
   return msg.text || "";
 }
 
-function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterEvent {
+function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterMessageEvent {
   const contentType = resolveContentType(msg.contentType);
   const isSticker = contentType === "sticker";
   const stickerId = isSticker ? msg.contentMetadata?.["STKID"] : undefined;
@@ -156,7 +209,10 @@ export async function handleOp(
   observe?: OpObserver,
 ): Promise<AdapterEvent | null> {
   const opType = op.type;
-  const chatId = op.message?.to ?? op.message?.from ?? "?";
+  const isUnsendOp = UNSEND_OP_TYPES.has(String(opType));
+  // 收回 op 沒有 op.message（資料在 param1/2/3），舊 fallback 只會記出 chat=?
+  const chatId =
+    op.message?.to ?? op.message?.from ?? (isUnsendOp ? String(op.param1 ?? "?") : "?");
   const report = (kind: OpObservationKind): void => {
     observe?.({
       kind,
@@ -166,6 +222,17 @@ export async function handleOp(
       ...(DUMP_OP_TYPES.has(String(opType)) ? { raw: op } : {}),
     });
   };
+
+  if (isUnsendOp) {
+    const unsend = destroyOpToUnsend(op);
+    if (!unsend) {
+      // 寧可不做也不做錯：param 缺一不可，猜出來的 id 會收回錯的訊息（R2）
+      report("dropped-no-msg");
+      return null;
+    }
+    report("kept-change");
+    return unsend;
+  }
 
   if (!MESSAGE_OP_TYPES.has(opType)) {
     report("dropped");
@@ -247,7 +314,7 @@ export interface BackfillParams {
 }
 
 export interface BackfillResult {
-  events: AdapterEvent[];
+  events: AdapterMessageEvent[];
   has_more: boolean;
   oldest_timestamp: number;
 }
@@ -267,7 +334,7 @@ export async function handleBackfill(
     before,
   );
 
-  const events: AdapterEvent[] = [];
+  const events: AdapterMessageEvent[] = [];
   for (const raw of rawMessages) {
     try {
       const decrypted = await client.decryptMessage(raw);
