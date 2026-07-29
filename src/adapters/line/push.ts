@@ -28,6 +28,65 @@ export function isNetworkError(err: unknown): boolean {
   );
 }
 
+const SOCKET_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENETUNREACH",
+  "EPIPE",
+]);
+
+/**
+ * Narrow classifier for "the push stream died" rejections.
+ *
+ * Deliberately NOT built on `isNetworkError`: that one also matches the generic
+ * message "fetch failed", and the M4 crash *and* an unrelated TLS failure both
+ * carry that exact top-level message. Matching on message would swallow real
+ * bugs — which is the very silence this project exists to remove. Only the
+ * error `code` and the `name` + "stream timeout" pair are considered, walked
+ * down the cause chain (bounded, so a cyclic cause cannot hang us).
+ */
+export function isPushStreamFailure(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 3; depth++) {
+    if (!(current instanceof Error)) return false;
+    const code = (current as any).code;
+    if (typeof code === "string" && SOCKET_ERROR_CODES.has(code)) return true;
+    if (
+      current.name === "InformationalError" &&
+      current.message.toLowerCase().includes("stream timeout")
+    )
+      return true;
+    current = (current as any).cause;
+    if (current === undefined || current === null) return false;
+  }
+  return false;
+}
+
+export interface PushCrashGuardDeps {
+  proc: {
+    on(event: "unhandledRejection", fn: (reason: unknown) => void): unknown;
+  };
+  onStreamFailure: (err: unknown) => void;
+  onFatal: (err: unknown) => void;
+}
+
+/**
+ * The undici h2 stream timeout arrives as an *orphan* rejection: linejs builds
+ * the push connection inside an un-awaited async IIFE, so no try/catch in this
+ * file can ever see it. The only interception point is process level.
+ *
+ * Anything we do not positively recognise as a push stream failure is handed to
+ * `onFatal`, which must keep today's fail-fast behaviour — trading a crash for
+ * a silent log would just swap one silence for another.
+ */
+export function installPushCrashGuard(deps: PushCrashGuardDeps): void {
+  deps.proc.on("unhandledRejection", (reason) => {
+    if (isPushStreamFailure(reason)) deps.onStreamFailure(reason);
+    else deps.onFatal(reason);
+  });
+}
+
 export function createPushSource(client: Client): PushSource {
   const polling = client.base.createPolling();
   client.base.push.opStream.renew();

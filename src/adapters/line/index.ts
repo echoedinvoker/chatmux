@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { handleOp, handleSendMessage, handleBackfill, type MessageClient } from "./messages.js";
 import { handleGetContacts, handleGetChats, ContactCache, enrichSenderName, type ContactClient } from "./contacts.js";
 import { login } from "./auth.js";
-import { createPushSource, ConnectionManager } from "./push.js";
+import { createPushSource, ConnectionManager, installPushCrashGuard } from "./push.js";
 
 export interface InitializeParams {
   data_dir: string;
@@ -260,6 +260,28 @@ async function main(): Promise<void> {
     connection?.stop();
     responder.destroy();
     return {};
+  });
+
+  // The undici h2 stream timeout surfaces as an orphan rejection that no
+  // try/catch inside push.ts can reach, so it has to be caught at process level.
+  // Everything we do not recognise keeps today's fail-fast behaviour.
+  installPushCrashGuard({
+    proc: process,
+    onStreamFailure: (err) => {
+      console.error(
+        "[LINE] push liveness: stream failure caught, will reconnect:",
+        err instanceof Error ? err.message : err,
+      );
+      // TODO(F27 step 2.6): demote the connection here via markStreamDead().
+      // That method lands in Phase 2.3; wiring a fake optional call now would
+      // look connected while doing nothing.
+    },
+    onFatal: (reason) => {
+      console.error("[LINE] unhandled rejection (not a push stream failure):", reason);
+      setImmediate(() => {
+        throw reason;
+      });
+    },
   });
 
   responder.start();
