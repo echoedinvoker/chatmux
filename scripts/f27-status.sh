@@ -13,8 +13,14 @@ SID=$(curl -s -D - -o /dev/null -X POST "$URL" "${HDRS[@]}" \
 curl -s -X POST "$URL" "${HDRS[@]}" -H "mcp-session-id: $SID" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
 
-curl -s -X POST "$URL" "${HDRS[@]}" -H "mcp-session-id: $SID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_status","arguments":{}}}' \
+OUT=$(curl -s -X POST "$URL" "${HDRS[@]}" -H "mcp-session-id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_status","arguments":{}}}')
+
+# Close the session. The daemon only drops it on transport close, so a polling
+# caller that skips this slowly fills the session map of the process under test.
+curl -s -X DELETE "$URL" "${HDRS[@]}" -H "mcp-session-id: $SID" >/dev/null
+
+printf '%s' "$OUT" \
   | sed -n 's/^data: //p' \
   | python3 -c 'import json,sys
 raw = sys.stdin.read().strip()
