@@ -433,4 +433,36 @@ describe("ConnectionManager", () => {
 
     mgr.stop();
   });
+
+  it("recovers event flow after a suspend-triggered stream death", async () => {
+    const received: any[] = [];
+    conn.onEvent((e) => received.push(e));
+    conn.start();
+    await sleep(20);
+
+    conn.markStreamDead("suspend-gap");
+    await sleep(120);
+
+    push.enqueue({ type: "SEND_MESSAGE", text: "after-resume" });
+    await sleep(60);
+
+    expect(received.some((e) => e.text === "after-resume")).toBe(true);
+    conn.stop();
+  });
+
+  it("does not hot-spin when initLegyPusher returns immediately (islisten sticky)", async () => {
+    let calls = 0;
+    const instant = createMockPushSource({
+      initBehavior: async () => {
+        calls++;
+      },
+    });
+    const mgr = new ConnectionManager(instant, TEST_OPTS);
+    mgr.start();
+    await sleep(200);
+    mgr.stop();
+
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThan(50); // throttled; unguarded this is thousands
+  });
 });

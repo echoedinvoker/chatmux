@@ -103,6 +103,53 @@ export function createPushSource(client: Client): PushSource {
   };
 }
 
+export interface SuspendDetectorDeps {
+  intervalMs: number;
+  thresholdMs: number;
+  now: () => number;
+  onSuspendDetected: (gapMs: number) => void;
+}
+
+export interface SuspendDetector {
+  tick(): void;
+  start(): void;
+  stop(): void;
+}
+
+/**
+ * Detects that the host was suspended by watching for wall-clock jumps between
+ * ticks. Waiting for undici's own 300s h2 timeout means ~7-10 minutes of
+ * claiming `connected` over a stream that is already gone; this notices within
+ * one tick instead.
+ *
+ * tick() is separate from the timer so tests can drive it synchronously.
+ */
+export function createSuspendDetector(deps: SuspendDetectorDeps): SuspendDetector {
+  let lastTickAt = deps.now();
+  let timer: ReturnType<typeof setInterval> | null = null;
+
+  const tick = () => {
+    const now = deps.now();
+    const gap = now - lastTickAt;
+    lastTickAt = now;
+    if (gap > deps.thresholdMs) deps.onSuspendDetected(gap);
+  };
+
+  return {
+    tick,
+    start() {
+      if (timer) return;
+      lastTickAt = deps.now();
+      timer = setInterval(tick, deps.intervalMs);
+      timer.unref?.();
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+  };
+}
+
 export interface ConnectionManagerOptions {
   networkRetryMs?: number;
   streamRetryMs?: number;
@@ -241,6 +288,10 @@ export class ConnectionManager {
       try {
         this.setState("connected");
         await this.push.initLegyPusher();
+        // In the real client this never returns. When it does return promptly,
+        // linejs's `islisten` guard bailed out early (it is sticky-true once the
+        // inner loop starts), and looping straight back would burn a core.
+        await sleep(this.streamRetryMs, signal);
       } catch (err) {
         if (signal.aborted) return;
         this.setState("reconnecting");

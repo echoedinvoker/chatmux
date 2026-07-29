@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 import { handleOp, handleSendMessage, handleBackfill, type MessageClient } from "./messages.js";
 import { handleGetContacts, handleGetChats, ContactCache, enrichSenderName, type ContactClient } from "./contacts.js";
 import { login } from "./auth.js";
-import { createPushSource, ConnectionManager, installPushCrashGuard } from "./push.js";
+import {
+  createPushSource,
+  ConnectionManager,
+  installPushCrashGuard,
+  createSuspendDetector,
+  type SuspendDetector,
+} from "./push.js";
 
 export interface InitializeParams {
   data_dir: string;
@@ -182,6 +188,7 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
 async function main(): Promise<void> {
   let lineClient: (MessageClient & ContactClient) | null = null;
   let connection: ConnectionManager | null = null;
+  let suspendDetector: SuspendDetector | null = null;
   let contactCache = new ContactCache([], []);
 
   const responder = new AdapterResponder(process.stdin, process.stdout);
@@ -257,6 +264,7 @@ async function main(): Promise<void> {
   });
 
   responder.onRequest("shutdown", async () => {
+    suspendDetector?.stop();
     connection?.stop();
     responder.destroy();
     return {};
@@ -414,5 +422,19 @@ async function main(): Promise<void> {
 
     connection.start();
     console.error("[LINE] push connection started");
+
+    // A suspended host leaves the push stream dead but locally silent: nothing
+    // errors, so without this we keep claiming `connected` until undici's 300s
+    // h2 timeout fires ~7-10 minutes later.
+    suspendDetector = createSuspendDetector({
+      intervalMs: Number(process.env.CHATMUX_F27_TICK_MS ?? 30_000),
+      thresholdMs: Number(process.env.CHATMUX_F27_GAP_MS ?? 90_000),
+      now: Date.now,
+      onSuspendDetected: (gap) => {
+        console.error(`[LINE] push liveness: suspend gap ${gap}ms detected`);
+        connection?.markStreamDead("suspend-gap");
+      },
+    });
+    suspendDetector.start();
   }
 }
