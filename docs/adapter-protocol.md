@@ -544,12 +544,25 @@ A change in adapter connection state.
 ```json
 {
   "state": "connected",
-  "detail": "LEGY Push connected"
+  "detail": "LEGY Push connected",
+  "last_liveness_evidence_at": 1753765200000
 }
 ```
 
-`state` is one of `"connecting"`, `"connected"`, `"reconnecting"`, `"disconnected"`,
-`"auth_required"`.
+`state` is one of `"connected"`, `"reconnecting"`, `"killed"`.
+
+`last_liveness_evidence_at` (optional, epoch ms) is the last moment the adapter
+had evidence its stream was alive — it advances only when the stream produces
+data or is successfully rebuilt. It is omitted while no such evidence exists.
+
+**`connected` means "no evidence the stream is dead", not "proven alive".**
+A push stream can die without any local error: the socket stays open, nothing
+throws, and the adapter goes on believing it is connected. Consumers judging how
+much to trust the state should read `last_liveness_evidence_at`, not `state`.
+
+Core compresses these three states into a boolean, so a `reconnecting` adapter
+surfaces through `get_status` and `chat://status` as `"disconnected"`. Those
+query APIs never emit the string `"reconnecting"`.
 
 ### `error`
 

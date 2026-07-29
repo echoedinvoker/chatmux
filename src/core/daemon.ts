@@ -270,13 +270,22 @@ function registerTools(server: McpServer): void {
       const dbSize = existsSync(dbPath) ? statSync(dbPath).size / (1024 * 1024) : 0;
       const jsonlSize = existsSync(jsonlPath) ? statSync(jsonlPath).size / (1024 * 1024) : 0;
 
-      const adaptersStatus: Record<string, { state: string; uptime_seconds?: number; rate_limit?: { remaining: number; resets_in_seconds: number } }> = {};
+      const adaptersStatus: Record<string, { state: string; uptime_seconds?: number; last_liveness_evidence_at?: number; liveness_age_seconds?: number; rate_limit?: { remaining: number; resets_in_seconds: number } }> = {};
       const statuses = manager.getStatuses();
       for (const [platform, status] of Object.entries(statuses)) {
         const uptime = status.connected ? Math.floor((Date.now() - status.startTime) / 1000) : 0;
         adaptersStatus[platform] = {
+          // `connected` here means "no evidence the stream is dead", NOT
+          // "proven alive". Consumers judging trustworthiness should read
+          // last_liveness_evidence_at, which only moves on real evidence.
           state: status.connected ? "connected" : manager.isKilled(platform) ? "killed" : "disconnected",
           uptime_seconds: uptime,
+          ...(status.lastLivenessEvidenceAt !== undefined
+            ? {
+                last_liveness_evidence_at: status.lastLivenessEvidenceAt,
+                liveness_age_seconds: Math.floor((Date.now() - status.lastLivenessEvidenceAt) / 1000),
+              }
+            : {}),
           rate_limit: { remaining: 5 - safety.rateLimiter.getCount(), resets_in_seconds: 60 },
         };
       }
@@ -304,10 +313,18 @@ function triggerOnDemandBackfill(chatId: string): void {
 
 function registerResources(server: McpServer): void {
   const resourceCtx = () => {
-    const adapters: Record<string, { state: string }> = {};
+    const adapters: Record<string, { state: string; last_liveness_evidence_at?: number; liveness_age_seconds?: number }> = {};
     const statuses = manager.getStatuses();
     for (const [platform, status] of Object.entries(statuses)) {
-      adapters[platform] = { state: status.connected ? "connected" : "disconnected" };
+      adapters[platform] = {
+        state: status.connected ? "connected" : "disconnected",
+        ...(status.lastLivenessEvidenceAt !== undefined
+          ? {
+              last_liveness_evidence_at: status.lastLivenessEvidenceAt,
+              liveness_age_seconds: Math.floor((Date.now() - status.lastLivenessEvidenceAt) / 1000),
+            }
+          : {}),
+      };
     }
 
     return {

@@ -402,4 +402,35 @@ describe("ConnectionManager", () => {
     expect(states.at(-1)).toBe("connected");
     mgr.stop();
   });
+
+  it("reports liveness on a throttle, so a steady stream does not spam core", async () => {
+    let clock = 1_000_000;
+    const reports: { state: ConnectionState; at: number | null }[] = [];
+    const mgr = new ConnectionManager(push, {
+      ...TEST_OPTS,
+      now: () => clock,
+      livenessReportMs: 30_000,
+      onLivenessReport: (state, at) => reports.push({ state, at }),
+    });
+
+    mgr.start();
+    await sleep(20);
+
+    push.enqueue({ type: "SEND_MESSAGE", text: "a" });
+    await sleep(20);
+    push.enqueue({ type: "SEND_MESSAGE", text: "b" });
+    await sleep(20);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!.at).toBe(1_000_000);
+
+    clock = 1_040_000; // past the throttle window
+    push.enqueue({ type: "SEND_MESSAGE", text: "c" });
+    await sleep(20);
+
+    expect(reports).toHaveLength(2);
+    expect(reports[1]!.at).toBe(1_040_000);
+    expect(reports[1]!.state).toBe("connected");
+
+    mgr.stop();
+  });
 });

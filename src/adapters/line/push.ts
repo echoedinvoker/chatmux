@@ -107,6 +107,11 @@ export interface ConnectionManagerOptions {
   networkRetryMs?: number;
   streamRetryMs?: number;
   now?: () => number;
+  livenessReportMs?: number;
+  onLivenessReport?: (
+    state: ConnectionState,
+    lastLivenessEvidenceAt: number | null,
+  ) => void;
 }
 
 export class ConnectionManager {
@@ -130,19 +135,41 @@ export class ConnectionManager {
    * the lie this project removes.
    */
   lastLivenessEvidenceAt: number | null = null;
+  private livenessReportMs: number;
+  private onLivenessReport?: (
+    state: ConnectionState,
+    lastLivenessEvidenceAt: number | null,
+  ) => void;
+  private lastLivenessReportAt: number | null = null;
 
   constructor(private push: PushSource, opts?: ConnectionManagerOptions) {
     this.networkRetryMs = opts?.networkRetryMs ?? 5000;
     this.streamRetryMs = opts?.streamRetryMs ?? 1000;
     this.now = opts?.now ?? Date.now;
+    this.livenessReportMs = opts?.livenessReportMs ?? 30_000;
+    this.onLivenessReport = opts?.onLivenessReport;
   }
 
   private noteLivenessEvidence(): void {
-    this.lastLivenessEvidenceAt = this.now();
+    const at = this.now();
+    this.lastLivenessEvidenceAt = at;
+
     // The stream producing data is the only thing that earns `connected` back.
     // pushLoop cannot do it: initLegyPusher never resolves in the real client,
     // so it declares connected exactly once in its lifetime.
     if (this.state !== "connected") this.setState("connected");
+
+    // Status notifications only fire on a *change* of state, so in the steady
+    // case (connected, ops flowing) this timestamp would never leave the
+    // process. Report it on a throttle instead — an honest field nobody can
+    // read is no better than no field at all.
+    if (
+      this.lastLivenessReportAt === null ||
+      at - this.lastLivenessReportAt >= this.livenessReportMs
+    ) {
+      this.lastLivenessReportAt = at;
+      this.onLivenessReport?.(this.state, at);
+    }
   }
 
   /**

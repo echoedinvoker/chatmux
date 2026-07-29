@@ -6,6 +6,11 @@ export interface AdapterStatus {
   connected: boolean;
   startTime: number;
   killed: boolean;
+  /**
+   * Last time the adapter had evidence its stream was alive. `connected` alone
+   * only means "no evidence of death"; this is the field to trust.
+   */
+  lastLivenessEvidenceAt?: number;
 }
 
 export interface AdapterManagerOpts {
@@ -52,8 +57,16 @@ export class AdapterManager {
       });
 
       runner.onStatus((params) => {
-        const status = params as { state: string };
+        const status = params as {
+          state: string;
+          last_liveness_evidence_at?: number;
+        };
         const s = this.statuses.get(config.platform)!;
+        // Only ever move it forward: a status without a timestamp says nothing
+        // about liveness, so it must not erase what we already knew.
+        if (typeof status.last_liveness_evidence_at === "number") {
+          s.lastLivenessEvidenceAt = status.last_liveness_evidence_at;
+        }
         if (status.state === "connected") {
           s.connected = true;
           s.startTime = Date.now();

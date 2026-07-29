@@ -272,9 +272,7 @@ async function main(): Promise<void> {
         "[LINE] push liveness: stream failure caught, will reconnect:",
         err instanceof Error ? err.message : err,
       );
-      // TODO(F27 step 2.6): demote the connection here via markStreamDead().
-      // That method lands in Phase 2.3; wiring a fake optional call now would
-      // look connected while doing nothing.
+      connection?.markStreamDead("push-stream-failure");
     },
     onFatal: (reason) => {
       console.error("[LINE] unhandled rejection (not a push stream failure):", reason);
@@ -367,7 +365,17 @@ async function main(): Promise<void> {
     // the push stream is up. Connection state is produced solely by
     // ConnectionManager, from evidence.
     const push = createPushSource(client);
-    connection = new ConnectionManager(push);
+    connection = new ConnectionManager(push, {
+      livenessReportMs: Number(process.env.CHATMUX_F27_LIVENESS_REPORT_MS ?? 30_000),
+      onLivenessReport: (state, lastLivenessEvidenceAt) => {
+        resp.notify("status", {
+          state,
+          ...(lastLivenessEvidenceAt !== null
+            ? { last_liveness_evidence_at: lastLivenessEvidenceAt }
+            : {}),
+        });
+      },
+    });
 
     connection.onEvent(async (op: any) => {
       const event = await handleOp(op, lineClient!, (o) => {
@@ -389,9 +397,14 @@ async function main(): Promise<void> {
       }
     });
 
-    connection.onStateChange((state) => {
+    connection.onStateChange((state, lastLivenessEvidenceAt) => {
       console.error(`[LINE] connection state: ${state}`);
-      resp.notify("status", { state });
+      resp.notify("status", {
+        state,
+        ...(lastLivenessEvidenceAt !== null
+          ? { last_liveness_evidence_at: lastLivenessEvidenceAt }
+          : {}),
+      });
     });
 
     connection.onError(async (err) => {
