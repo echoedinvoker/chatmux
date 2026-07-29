@@ -32,6 +32,7 @@ import {
 import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
 import { needsBackfill, backfillChat, type BackfillDeps } from "./backfill-on-demand.js";
 import { catchUpAdapter } from "./cold-start-catchup.js";
+import { createReconnectCatchupTrigger } from "./reconnect-catchup.js";
 
 const dataDir = resolve(
   process.env.CHATMUX_DATA_DIR ?? join(process.env.HOME ?? "~", ".local/share/chatmux"),
@@ -123,9 +124,26 @@ manager.onEvent((platform: string, params: unknown) => {
   ingestLive(platform, params, "live");
 });
 
+// Fires on the adapter's raw three states, not the boolean core exposes through
+// get_status — so `reconnecting` is visible here even though the query APIs
+// never emit that string.
+const reconnectCatchup = createReconnectCatchupTrigger({
+  runCatchup: async (platform) => {
+    console.error(`[daemon] [${platform}] reconnect catch-up: starting`);
+    await backfillAdapter(platform);
+    console.error(`[daemon] [${platform}] reconnect catch-up: done`);
+  },
+});
+
 manager.onStatus((platform: string, params: unknown) => {
   const status = params as { state: string };
   console.error(`[daemon] [${platform}] adapter status: ${status.state}`);
+  // onStatus is typed `=> void`, so this promise has no owner. Keep the handler
+  // synchronous and attach the platform to any failure — an anonymous top-level
+  // rejection log is precisely the silence this project is removing.
+  void reconnectCatchup.onStatus(platform, status.state).catch((e) =>
+    console.error(`[daemon] [${platform}] reconnect catch-up failed:`, e),
+  );
 });
 
 manager.onError((platform: string, params: unknown) => {

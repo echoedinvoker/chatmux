@@ -413,6 +413,10 @@ describe("catch-up outcome persistence", () => {
  *
  * Asserted against the source text because importing daemon.ts opens the real database and
  * spawns adapter subprocesses.
+ *
+ * Scoped to coldStartAdapter's body: since F27 the file has a second
+ * backfillAdapter call site (the reconnect catch-up trigger, defined higher up),
+ * so a whole-file indexOf would compare against that one instead.
  */
 describe("cold start call order (catch-up priority precondition)", () => {
   test("applyMessageBoxRecency refreshes last_activity_at before backfillAdapter runs", () => {
@@ -421,8 +425,14 @@ describe("cold start call order (catch-up priority precondition)", () => {
       "utf-8",
     );
 
-    const refresh = source.indexOf("applyMessageBoxRecency(db, platform, boxes)");
-    const catchUp = source.indexOf("await backfillAdapter(platform)");
+    const bodyStart = source.indexOf("async function coldStartAdapter(");
+    expect(bodyStart).toBeGreaterThan(-1);
+    const bodyEnd = source.indexOf("\nasync function backfillAdapter(", bodyStart);
+    expect(bodyEnd).toBeGreaterThan(bodyStart);
+    const body = source.slice(bodyStart, bodyEnd);
+
+    const refresh = body.indexOf("applyMessageBoxRecency(db, platform, boxes)");
+    const catchUp = body.indexOf("await backfillAdapter(platform)");
 
     expect(refresh).toBeGreaterThan(-1);
     expect(catchUp).toBeGreaterThan(-1);
