@@ -171,12 +171,24 @@ Daemon starts
         → only fills in last_activity_at for chats already in the chats table
         → any box absent from get_chats is skipped with a WARN — type is never
           guessed, get_chats is the sole authority
-    → backfill: walk chats by last_activity_at descending, 50 messages per round
-      → stops as soon as a global counter hits 500 (does not finish every chat)
-      → one pass only — the rest of history is fetched on demand (below)
+    → cold-start catch-up (cold-start-catchup.ts): close the hole the downtime opened
+      → order chats by gap signal first — last_activity_at > last_message_at means the
+        platform reported activity we hold no message for — then last_activity_at desc
+      → skip chats with no stored message at all: there is nothing to join back to,
+        and fetching a whole history is on-demand's job, not cold start's
+      → per chat: first round asks for 50 with NO before_message_id (protocol v0.7.1:
+        that means "the newest ones"), then each round anchors on the previous round's
+        oldest message and walks back until a batch reaches a message we already have
+      → give up per chat after 3 rounds, and stop the pass at 500 messages — both
+        recorded in chats.catchup_state, never a silent break
   → MCP Server starts
   → begins listening for live push events
 ```
+
+Cold start walks *towards* the newest message, not away from it. That direction is the
+whole point: what a restart loses is the messages that arrived while core was down, and
+the pre-F26 code paged backwards into history it already had, so the hole was never
+touched. History older than what we store is the on-demand path's business (below).
 
 ### On-demand backfill
 
@@ -194,6 +206,13 @@ read_messages / chat://chats/{id}/messages
       → record what was learned in chats.backfill_state
       → notify subscribers → consumer re-reads → the buffer fills in
 ```
+
+**Two state machines, deliberately not shared.** On-demand backfill records into
+`backfill_state` / `backfill_attempted_at` / `backfill_oldest_id`; cold-start catch-up
+records into `catchup_state` / `catchup_checked_at`. They answer different questions —
+"how far back have we read this chat?" versus "did we close the hole the last restart
+opened?" — and a chat can be fully backfilled and still have an open catch-up gap, or the
+reverse. Collapsing them would make each answer the wrong question.
 
 The trigger sits in core rather than in each consumer, so anything speaking MCP — including
 Claude Code connecting directly — gets the same behaviour without implementing it.

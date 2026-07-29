@@ -369,6 +369,40 @@ describe("catch-up outcome persistence", () => {
     expect(results[0]!.batches).toBe(2);
     expect(readState("c_inclusive").catchup_state).toBe("no-older-available");
   });
+
+  /**
+   * 同一個真實狀態的另一種合法表達（協定 v0.7.1：邊界 MAY 為 inclusive 或 exclusive）。
+   * Telethon 的 offset_id 是明文 exclusive 的，所以「沒有更舊的」在 Telegram 側是空陣列，
+   * 不是「只回 anchor」。
+   *
+   * 這裡不能沿用 batch 1 回空的判讀：batch 1 回空是「我們沒問對」（不在 messageBoxes），
+   * batch 2+ 回空是「帶著真實 anchor 問了，平台說沒有更舊的」。把後者記成 no-newer
+   * 等於宣稱洞不存在，但洞還開著——那正是 4.5c 修掉的混淆換平台重演。
+   */
+  test("an exclusive boundary with nothing older is no-older-available, not no-newer", async () => {
+    const chatId = insertChat(db, "c_exclusive", T0 + 100_000);
+    db.prepare("UPDATE chats SET last_message_at = ? WHERE id = ?").run(T0, chatId);
+    insertMessage(db, chatId, "e_000", T0);
+
+    const newest = [
+      makeEvent("c_exclusive", "e_010", T0 + 10_000),
+      makeEvent("c_exclusive", "e_011", T0 + 11_000),
+    ];
+    const sendRequest = async (_p: string, _m: string, params: unknown) => {
+      const anchor = (params as { before_message_id?: string }).before_message_id;
+      // exclusive 邊界：anchor 自己不算，而它之前沒有更舊的 ⇒ 空陣列
+      return anchor ? { events: [] } : { events: newest };
+    };
+
+    const results = await catchUpAdapter(
+      { db, sendRequest, ingest: () => {}, log: () => {}, now: () => T0 + 500 },
+      "line",
+    );
+
+    expect(results[0]!.outcome).toBe("no-older-available");
+    expect(results[0]!.batches).toBe(2);
+    expect(readState("c_exclusive").catchup_state).toBe("no-older-available");
+  });
 });
 
 /**

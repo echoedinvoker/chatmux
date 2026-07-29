@@ -84,12 +84,30 @@ CREATE TABLE chats (
   backfill_state TEXT,             -- unknown|partial|exhausted|unavailable (NULL = unknown)
   backfill_attempted_at INTEGER,   -- ms; set on every attempt, success or failure
   backfill_oldest_id TEXT,         -- anchor used last time, to detect a stalled walk
+  catchup_state TEXT,              -- joined|gap-not-closed|gap-stalled|no-older-available
+                                   --   |not-in-message-boxes|failed (NULL = never attempted)
+  catchup_checked_at INTEGER,      -- ms; set on every cold-start catch-up attempt
   raw TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
   UNIQUE(platform, platform_id)
 );
 ```
+
+**`backfill_*` and `catchup_*` are two separate state machines, on purpose.** The
+`backfill_*` columns belong to on-demand backfill: how far back into history we have read
+this chat, updated when someone opens it. The `catchup_*` columns belong to cold-start
+catch-up: whether the hole the last restart opened got closed, updated on every start.
+A chat can be `backfill_state = 'exhausted'` and still carry an open catch-up gap, or the
+reverse — sharing one column would force each to answer the other's question.
+
+The catch-up outcomes are deliberately not collapsed into a success/failure pair, because
+they are things core is entitled to say and things it is not. `gap-stalled` means paging
+is broken (a bug); `gap-not-closed` means the budget ran out (capacity);
+`no-older-available` means the platform declined to go further back (retention);
+`not-in-message-boxes` means we never asked properly (coverage). **None of them licenses
+telling the user "this is everything"** — that claim belongs to on-demand's `exhausted`
+alone.
 
 **The adapter's `get_chats` is the sole authority on `type`.** The column is
 `NOT NULL CHECK`, so there is no "unknown" value to fall back on — which means core

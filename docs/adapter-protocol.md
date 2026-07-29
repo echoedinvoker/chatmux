@@ -1,7 +1,7 @@
 # Adapter Protocol
 
-> **Protocol version**: 0.7
-> **Validated against**: LINE (v0.1, v0.4, v0.5, v0.6, v0.7), Telegram (v0.2, v0.3, v0.4, v0.5, v0.6 — still sends the deprecated `last_message_at` name, which core accepts as an alias)
+> **Protocol version**: 0.7.1
+> **Validated against**: LINE (v0.1, v0.4, v0.5, v0.6, v0.7, v0.7.1), Telegram (v0.2, v0.3, v0.4, v0.5, v0.6, v0.7.1 — still sends the deprecated `last_message_at` name, which core accepts as an alias)
 > **Changelog**: at the bottom of this document
 
 A chatmux adapter is a child process that talks to the core daemon over
@@ -375,6 +375,43 @@ platforms at all: LINE's `getPreviousMessagesV2WithRequest` returns nothing for 
 whose message id is `0`, and Telegram's `offset_id` does not lose messages that share a
 second the way `offset_date` can.
 
+#### No anchor means "the newest ones"
+
+> **Contract since v0.7.1.** This documents behaviour both first-party adapters already
+> had; it is a clarification, not a new requirement.
+
+When `before_message_id` is **absent**, the adapter **MUST** return the chat's newest
+`count` messages — not an arbitrary page, and not the oldest ones. Core's cold-start
+catch-up depends on this: it starts a chat's catch-up with a deliberately unanchored
+request precisely because that is how it asks for "whatever is at the top right now", then
+walks backwards with anchors until the batch reaches a message it already stores.
+
+An adapter that answers an unanchored request with some other page does not fail loudly —
+it silently returns messages core already has, the loop never joins back, and messages that
+arrived while core was offline are never fetched. That failure is invisible from the
+outside, which is why it is a MUST.
+
+#### The anchor boundary may be inclusive or exclusive
+
+An adapter **MAY** treat `before_message_id` as inclusive (the anchor message itself is in
+the response) or exclusive (it is not). Both are legal, because platforms differ and
+neither can be had for free: LINE's `getPreviousMessages(endMessageId)` is inclusive,
+Telethon's `offset_id` is documented exclusive.
+
+What an adapter **MUST NOT** do is leave "there is nothing older than the anchor"
+indistinguishable from "here is another page". Concretely, when no message older than the
+anchor exists, the response's `events` MUST be either:
+
+- **just the anchor message itself** (the inclusive style), or
+- **an empty array** (the exclusive style).
+
+Core treats both as *the platform declining to go further back* and stops paging that
+chat. Anything else — a full batch containing no message older than the anchor — is read as
+a broken pager and reported as such, because that is what it usually is.
+
+Core deduplicates, so the anchor coming back a second time costs a redundant row read, not
+a duplicate message. Pick whichever your platform gives you naturally.
+
 **Response result:**
 ```json
 {
@@ -387,14 +424,26 @@ second the way `offset_date` can.
 Each entry in `events` has the same shape as an `event` notification's params.
 `has_more: false` means that chat has been exhausted.
 
-**Cold-start procedure** (core-side logic):
+**Cold-start procedure** (core-side logic). Core is not fetching history here — it is
+closing the gap that opened while it was offline, which is why it walks *towards* the
+newest message rather than away from it:
 
-1. Take the chat list and sort by last message time, descending.
-2. Call backfill per chat, `count=50` per round.
-3. Accumulate into a global counter and stop at 500 — without necessarily visiting every chat.
-4. Stop there. A single pass is deliberate: walking further back on start would spend the
-   budget on whatever happens to sort first, and history is fetched on demand when a chat is
-   actually opened (see `before_message_id` above). There is no second round.
+1. Sort chats so that any chat whose `last_activity_at` is newer than the newest message
+   core stores comes first — the platform is reporting activity core has no message for,
+   which is exactly the shape of a chat with a hole. The rest follow by `last_activity_at`
+   descending.
+2. Skip chats where core stores no message at all. There is nothing to join back to, and
+   fetching a whole history belongs to the on-demand path, not to cold start.
+3. For each remaining chat, request `count=50` **without** `before_message_id` — that is
+   the "give me the newest ones" request above. Then keep paging backwards, each round
+   anchored on the oldest message of the previous one, until a batch reaches a message core
+   already stores. That is the gap closed.
+4. Give up on a chat after 3 rounds, and stop the whole pass after 500 messages. Both
+   limits are recorded per chat rather than left silent, so a hole core ran out of budget
+   for stays visible instead of reading as "no hole".
+
+History older than what core already stores is still fetched on demand when a chat is
+actually opened (see `before_message_id` above).
 
 **Backfill interleaving with live events**: backfill and live push can produce events with
 the same message ID. Core's Storage deduplicates with `INSERT OR IGNORE` against a UNIQUE
@@ -615,6 +664,17 @@ A valid adapter is a standalone program in any language that only needs to:
 ---
 
 ## Changelog
+
+### v0.7.1 — what "no anchor" and "nothing older" mean
+
+Clarification only. Both first-party adapters already behave this way; no adapter needs a
+change. The version is bumped so a third-party author can tell whether their copy of this
+document predates the rule.
+
+| Change | Rationale |
+|--------|-----------|
+| §backfill: an absent `before_message_id` MUST mean "the newest `count` messages" | Core's cold-start catch-up asks for the top of the chat by *omitting* the anchor, then pages backwards until it reaches a message it already stores. That behaviour existed only as a side effect of the LINE adapter's else branch and was never written down — a third-party adapter built strictly from this document could page differently, and catch-up would silently fetch nothing new while reporting success |
+| §backfill: the anchor boundary MAY be inclusive or exclusive, but "nothing older" MUST be either the anchor alone or an empty array | The two first-party adapters already differ (LINE inclusive, Telethon documented exclusive) and neither can cheaply become the other, so mandating one would break a shipped adapter for no gain. What core actually needs is not a single boundary but the ability to tell *"the platform will not go further back"* apart from *"the pager is broken"*; pinning down only that distinction leaves both styles legal |
 
 ### v0.7 — the ordering signal is activity, not a landed message
 

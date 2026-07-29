@@ -45,6 +45,9 @@ tests/
 │   ├── event-cursor.test.ts     # read_events cursor semantics
 │   ├── read-events-changes.test.ts # change events re-enter the sequence at the tail
 │   ├── daemon-live.test.ts      # live vs backfill ingest wiring
+│   ├── daemon-backfill-anchor.test.ts # history walks back, catch-up walks forward
+│   ├── cold-start-catchup.test.ts # catch-up loop: termination, priority, outcomes
+│   ├── land-backfill.test.ts    # backfill reads SQLite before it writes JSONL
 │   ├── mcp-server.test.ts       # Transport: TCP + unix socket listeners
 │   └── mcp-tools.test.ts        # MCP tools + resources
 ├── adapters/
@@ -270,3 +273,15 @@ systemctl --user start chatmux
 6. **Assert**: `result.success === true`, `result.message_id` present and non-empty, `result.timestamp` a number.
 7. **Teardown** (`afterAll`): `runner.stop()`.
 8. **Mutation sanity check** (manual, not in CI): verify at least one regression — deliberately break a layer of the send path, watch the test go red, restore it, watch it go green. This proves the test has teeth.
+
+## Candidate cases for a `chatmux adapter test` conformance harness
+
+There is no harness yet. This is the shortlist for when there is one — cases where an
+adapter can be *wrong in a way nothing currently notices*, which is the only kind worth
+building a harness for. A case earns its place here by having burned us once.
+
+| Case | What it asserts | Why it is invisible today |
+|------|-----------------|---------------------------|
+| **Unanchored backfill returns the newest page** | `backfill` with no `before_message_id` answers with the chat's newest `count` messages (protocol §backfill, v0.7.1) | An adapter that returns some other page still returns *valid* messages. Core's cold-start catch-up then re-ingests what it already has, never joins back, and reports success while fetching nothing new. Nothing goes red — not the adapter's tests, not core's. Found 2026-07-29 (F26 Phase 5a): the rule existed only as a side effect of the LINE adapter's else branch and had never been written down |
+| **"Nothing older" is distinguishable from "another page"** | With an anchor and no older message available, `events` is either the anchor alone or empty — never a full batch with nothing older (protocol §backfill, v0.7.1) | Core reads a full batch containing nothing older than the anchor as a broken pager. An adapter that pages in some third way gets its retention limit reported as a bug, or worse, its bug reported as a retention limit. Core's own version of this confusion took a dedicated fix (F26 Phase 4.5c) |
+| **`get_message_boxes` absence answers `-32601`** | An adapter without the method replies with the JSON-RPC code, not a message-shaped error | Core matches on `error.code` only. An adapter that returns a custom error object instead silently loses its backfill ordering signal |

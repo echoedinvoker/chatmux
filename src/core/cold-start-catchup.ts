@@ -24,7 +24,6 @@ export const MAX_CATCHUP_BATCHES = 3;
  */
 export type CatchupOutcome =
   | "joined"
-  | "no-newer"
   | "gap-not-closed"
   | "gap-stalled"
   | "no-older-available"
@@ -180,9 +179,15 @@ export async function catchUpAdapter(
           // An empty first batch is NOT "the platform has nothing". Chats absent from
           // getMessageBoxes answer empty because we never asked properly — the "fake platform
           // limit" trap F4 already fixed once (誠實性約束 #3).
+          //
+          // An empty LATER batch is a different statement: we asked with a real anchor and the
+          // platform had nothing older. That is the exclusive-boundary spelling of what an
+          // inclusive adapter says by returning the anchor alone (protocol v0.7.1 allows both),
+          // so it must land on the same outcome. Calling it "no-newer" would claim the gap is
+          // closed while it is still open — the same conflation 4.5c removed, one platform over.
           return cursorAnchor === null
             ? done("not-in-message-boxes")
-            : done("no-newer");
+            : done("no-older-available");
         }
 
         const oldest = events.reduce((a, b) => (b.timestamp < a.timestamp ? b : a));
