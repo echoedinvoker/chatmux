@@ -12,6 +12,7 @@ import {
   createSuspendDetector,
   type SuspendDetector,
 } from "./push.js";
+import { subscribeClientLog, safeStringify } from "./diagnostics.js";
 
 export interface InitializeParams {
   data_dir: string;
@@ -372,6 +373,12 @@ async function main(): Promise<void> {
     // No status announcement here: login succeeding says nothing about whether
     // the push stream is up. Connection state is produced solely by
     // ConnectionManager, from evidence.
+    // 放在 push 建立之前，才接得到 push 初始化本身噴的 log（含 LegyPusherError_cannot_init）。
+    // ⚠️ 必須訂閱 `client.base`：`log()` 定義在 BaseClient（base/core/mod.ts:211），
+    // `Client`（client/client.ts:85）是獨立的 emitter 且不轉發 "log"。掛在 client 上的 listener
+    // 永遠不會被觸發，且完全靜默——2026-07-29 斷網反證抓到過一次。
+    subscribeClientLog(client.base, (l) => console.error(l));
+
     const push = createPushSource(client);
     connection = new ConnectionManager(push, {
       livenessReportMs: Number(process.env.CHATMUX_F27_LIVENESS_REPORT_MS ?? 30_000),
@@ -387,7 +394,11 @@ async function main(): Promise<void> {
 
     connection.onEvent(async (op: any) => {
       const event = await handleOp(op, lineClient!, (o) => {
+        // 既有單行格式不變（F23 儀器的下游可能在 parse 它）。
         console.error(`[LINE] op ${o.kind}: ${o.opType} chat=${o.chatId} t=${o.t}`);
+        if (o.raw !== undefined) {
+          console.error(`[LINE] op raw: ${safeStringify(o.raw)}`);
+        }
       });
       if (event) {
         if (!event.sender.display_name) {

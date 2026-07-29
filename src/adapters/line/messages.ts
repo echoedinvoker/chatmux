@@ -35,7 +35,18 @@ export interface OpObservation {
   opType: unknown; // 原始字面值，不做映射（linejs 可能給數字或字串 enum）
   chatId: string;
   t: unknown;
+  // 只在 DUMP_OP_TYPES 命中時帶上：這些 op 沒有 op.message，資料在 param1/2/3，
+  // 而現行儀器只記 kind/opType/chatId/t ⇒ param 對應無從反推。其餘 op 不帶，避免灌爆 journal。
+  raw?: unknown;
 }
+
+// 狀態類 op：要連完整結構一起 dump 才能反推 thrift param 對應。
+// ⚠️ 只放具名的少數幾個——全量 dump 會撞 journald rate limit。
+const DUMP_OP_TYPES = new Set([
+  "DESTROY_MESSAGE",
+  "NOTIFIED_DESTROY_MESSAGE",
+  "NOTIFIED_SEND_REACTION",
+]);
 
 export type OpObserver = (observation: OpObservation) => void;
 
@@ -147,7 +158,13 @@ export async function handleOp(
   const opType = op.type;
   const chatId = op.message?.to ?? op.message?.from ?? "?";
   const report = (kind: OpObservationKind): void => {
-    observe?.({ kind, opType, chatId, t: op.createdTime });
+    observe?.({
+      kind,
+      opType,
+      chatId,
+      t: op.createdTime,
+      ...(DUMP_OP_TYPES.has(String(opType)) ? { raw: op } : {}),
+    });
   };
 
   if (!MESSAGE_OP_TYPES.has(opType)) {

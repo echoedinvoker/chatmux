@@ -593,3 +593,40 @@ describe("handleBackfill", () => {
     expect(result.events[1].sender.platform_id).toBe("u_friend");
   });
 });
+
+// ── Phase 0.3（F13+F29）：狀態類 op 連完整結構一起 report ──────────────
+// ⚠️ dump 對象刻意用 NOTIFIED_SEND_REACTION 而非 NOTIFIED_DESTROY_MESSAGE：
+// 後者在 Phase 2.1 會進 UNSEND_OP_TYPES 並改報 kept-change，屆時 kind 斷言必然變紅，
+// 最省事的改法是放寬 kind 斷言——那會拿掉唯一守著 kept / kept-change 區分的東西，
+// 而 F23 的 467:467 守恆靠它。
+describe("op observer dump（Phase 0.3）", () => {
+  const stubClient = createMockClient();
+
+  it("狀態類 op 被丟棄時連完整結構一起 report", async () => {
+    const seen: OpObservation[] = [];
+    const op = {
+      type: "NOTIFIED_SEND_REACTION",
+      param1: "cAAA",
+      param2: "12345",
+      param3: "0",
+      createdTime: 1785307616740,
+    };
+
+    const ev = await handleOp(op, stubClient, (o) => seen.push(o));
+
+    expect(ev).toBeNull();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].kind).toBe("dropped");
+    expect(seen[0].raw).toEqual(op);
+  });
+
+  it("非狀態類的雜訊 op 不夾帶完整結構（避免灌爆 journal）", async () => {
+    const seen: OpObservation[] = [];
+    const op = { type: "NOTIFIED_READ_MESSAGE", param1: "cAAA", createdTime: 1 };
+
+    await handleOp(op, stubClient, (o) => seen.push(o));
+
+    expect(seen[0].kind).toBe("dropped");
+    expect(seen[0].raw).toBeUndefined();
+  });
+});
