@@ -489,7 +489,7 @@ export function handleGetStatus(db: Database, input: StatusInput): StatusOutput 
 /**
  * F23 探針：dev-only、唯讀。
  *
- * on-demand backfill 的 anchor 是該室**最舊**訊息（buildBackfillParams →
+ * on-demand backfill 的 anchor 是該室**最舊**訊息（buildHistoryBackfillParams →
  * getOldestMessageAnchor），所以它往更舊分頁，抓不到 F23 缺的那則「比最後落地
  * 訊息更新」的訊息。此探針刻意**不帶 before_message_id**，讓 adapter fallback 到
  * box.lastDeliveredMessageId → 回該室最新 N 則。

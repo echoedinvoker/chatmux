@@ -29,7 +29,7 @@ import {
   type ProbeDeps,
 } from "./mcp/tools.js";
 import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
-import { buildBackfillParams } from "./storage/query.js";
+import { buildCatchupBackfillParams } from "./storage/query.js";
 import { needsBackfill, backfillChat, type BackfillDeps } from "./backfill-on-demand.js";
 
 const dataDir = resolve(
@@ -463,7 +463,7 @@ async function backfillAdapter(platform: string): Promise<void> {
       const result = await manager.sendRequest(
         platform,
         "backfill",
-        buildBackfillParams(db, platform, chat.platform_id, PER_CHAT_BATCH)
+        buildCatchupBackfillParams(chat.platform_id, PER_CHAT_BATCH)
       ) as { events: JsonlEvent[]; has_more: boolean };
 
       for (const event of result.events) {

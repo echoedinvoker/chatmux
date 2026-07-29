@@ -259,7 +259,27 @@ export function getOldestMessageAnchor(
     .get(platform, chatPlatformId) ?? null;
 }
 
-export function buildBackfillParams(
+export function getNewestMessageAnchor(
+  db: Database,
+  platform: string,
+  chatPlatformId: string
+): MessageAnchor | null {
+  return db
+    .query<MessageAnchor, [string, string]>(
+      `SELECT m.platform_message_id, m.timestamp
+       FROM messages m
+       JOIN chats c ON c.id = m.chat_id
+       WHERE c.platform = ? AND c.platform_id = ?
+       ORDER BY m.timestamp DESC, m.seq DESC
+       LIMIT 1`
+    )
+    .get(platform, chatPlatformId) ?? null;
+}
+
+/**
+ * On-demand history paging (F4): anchor on the OLDEST known message and walk backwards.
+ */
+export function buildHistoryBackfillParams(
   db: Database,
   platform: string,
   chatPlatformId: string,
@@ -275,6 +295,18 @@ export function buildBackfillParams(
     before_message_id: anchor.platform_message_id,
     count,
   };
+}
+
+/**
+ * Cold start catch-up (F26), batch 1: deliberately omit before_message_id so the adapter
+ * falls back to the platform's latest message. before_timestamp is ignored by the adapter
+ * in this branch (see docs/adapter-protocol.md) — it is present only to satisfy the schema.
+ */
+export function buildCatchupBackfillParams(
+  chatPlatformId: string,
+  count: number
+): BackfillParams {
+  return { chat_id: chatPlatformId, before_timestamp: Date.now(), count };
 }
 
 /**

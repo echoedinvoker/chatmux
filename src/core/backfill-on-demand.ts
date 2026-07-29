@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import {
-  buildBackfillParams,
+  buildHistoryBackfillParams,
   getOldestMessageAnchor,
   resolveChatInternalId,
 } from "./storage/query.js";
@@ -126,7 +126,7 @@ export async function backfillChat(deps: BackfillDeps, chatId: string): Promise<
   const before = getOldestMessageAnchor(db, chat.platform, chat.platformId);
 
   try {
-    const params = buildBackfillParams(db, chat.platform, chat.platformId, ON_DEMAND_BATCH);
+    const params = buildHistoryBackfillParams(db, chat.platform, chat.platformId, ON_DEMAND_BATCH);
     const result = (await deps.sendRequest(chat.platform, "backfill", params)) as {
       events?: unknown[];
       has_more?: boolean;
