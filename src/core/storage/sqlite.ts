@@ -76,6 +76,7 @@ export function initSchema(db: Database): void {
 
   migrateChangeColumns(db);
   migrateBackfillColumns(db);
+  migrateCatchupColumns(db);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS attachments (
@@ -137,6 +138,25 @@ function migrateBackfillColumns(db: Database): void {
   if (!existing.has("backfill_state")) db.exec("ALTER TABLE chats ADD COLUMN backfill_state TEXT");
   if (!existing.has("backfill_attempted_at")) db.exec("ALTER TABLE chats ADD COLUMN backfill_attempted_at INTEGER");
   if (!existing.has("backfill_oldest_id")) db.exec("ALTER TABLE chats ADD COLUMN backfill_oldest_id TEXT");
+}
+
+/**
+ * Cold start catch-up bookkeeping (F26), deliberately separate from `backfill_state`.
+ *
+ * The two paths walk in opposite directions — on-demand pages backwards through history,
+ * catch-up walks forward to close a gap — and `backfill_state`'s vocabulary
+ * (unknown/partial/exhausted/unavailable) already belongs to the former. Sharing the column
+ * would let each cold start overwrite what the on-demand path told the user, and would put
+ * "the budget ran out" behind the word `exhausted`, which reads on screen as "this is
+ * everything". NULL means catch-up has never run for this chat.
+ */
+function migrateCatchupColumns(db: Database): void {
+  const existing = new Set(
+    db.query<{ name: string }, []>("PRAGMA table_info(chats)").all().map((c) => c.name)
+  );
+
+  if (!existing.has("catchup_state")) db.exec("ALTER TABLE chats ADD COLUMN catchup_state TEXT");
+  if (!existing.has("catchup_checked_at")) db.exec("ALTER TABLE chats ADD COLUMN catchup_checked_at INTEGER");
 }
 
 /**

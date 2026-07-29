@@ -29,8 +29,8 @@ import {
   type ProbeDeps,
 } from "./mcp/tools.js";
 import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
-import { buildCatchupBackfillParams } from "./storage/query.js";
 import { needsBackfill, backfillChat, type BackfillDeps } from "./backfill-on-demand.js";
+import { catchUpAdapter } from "./cold-start-catchup.js";
 
 const dataDir = resolve(
   process.env.CHATMUX_DATA_DIR ?? join(process.env.HOME ?? "~", ".local/share/chatmux"),
@@ -448,38 +448,14 @@ async function coldStartAdapter(platform: string): Promise<void> {
 }
 
 async function backfillAdapter(platform: string): Promise<void> {
-  const chats = db.query<{ platform_id: string; last_activity_at: number | null }, [string]>(
-    "SELECT platform_id, last_activity_at FROM chats WHERE platform = ? ORDER BY last_activity_at DESC NULLS LAST"
-  ).all(platform);
-
-  let totalBackfilled = 0;
-  const PER_CHAT_BATCH = 50;
-  const GLOBAL_TARGET = 500;
-
-  for (const chat of chats) {
-    if (totalBackfilled >= GLOBAL_TARGET) break;
-
-    try {
-      const result = await manager.sendRequest(
-        platform,
-        "backfill",
-        buildCatchupBackfillParams(chat.platform_id, PER_CHAT_BATCH)
-      ) as { events: JsonlEvent[]; has_more: boolean };
-
-      for (const event of result.events) {
-        ingestBackfill(platform, event, "backfill");
-      }
-
-      // 維持 result.events.length：這是對上游平台的請求配額語意（GLOBAL_TARGET），
-      // 不是落地筆數。改成只計已落地會讓同樣預算向平台多要訊息。
-      totalBackfilled += result.events.length;
-      console.error(`[daemon] [${platform}] backfill ${chat.platform_id}: ${result.events.length} msgs (total: ${totalBackfilled})`);
-    } catch (err) {
-      console.error(`[daemon] [${platform}] backfill ${chat.platform_id} failed:`, err);
-    }
-  }
-
-  console.error(`[daemon] [${platform}] cold start complete. ${totalBackfilled} messages backfilled.`);
+  await catchUpAdapter(
+    {
+      db,
+      sendRequest: (p, method, params) => manager.sendRequest(p, method, params),
+      ingest: (p, event, source) => ingestBackfill(p, event as JsonlEvent, source),
+    },
+    platform,
+  );
 }
 
 /**
