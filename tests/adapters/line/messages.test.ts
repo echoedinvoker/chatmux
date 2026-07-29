@@ -692,3 +692,45 @@ describe("handleOp — unsend（F29：LINE 收回 op → unsend 事件）", () =
     expect((ev as any).content.text).toBe("hi");
   });
 });
+
+// ── Phase 3.2（F13）：貼圖事件帶滿 sticker_id + package_id ─────────────
+describe("msgToEvent — 貼圖欄位（Phase 3.2）", () => {
+  const stubClient = createMockClient();
+
+  const stickerOp = (meta: Record<string, string>) => ({
+    type: "RECEIVE_MESSAGE",
+    message: {
+      from: "uOTHER",
+      to: "uSELF",
+      toType: "USER",
+      id: "9",
+      createdTime: 1n,
+      text: "",
+      contentType: "STICKER",
+      contentMetadata: meta,
+    },
+  });
+
+  it("貼圖事件同時帶 sticker_id 與 package_id", async () => {
+    const ev = (await handleOp(
+      stickerOp({ STKID: "14406089", STKPKGID: "1365252" }),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+
+    expect(ev!.content.type).toBe("sticker");
+    expect(ev!.content.sticker_id).toBe("14406089");
+    expect(ev!.content.package_id).toBe("1365252");
+  });
+
+  it("缺 STKPKGID 時不塞出一個 undefined 鍵", async () => {
+    const ev = (await handleOp(
+      stickerOp({ STKID: "1" }),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+
+    expect(ev!.content.sticker_id).toBe("1");
+    expect("package_id" in ev!.content).toBe(false);
+  });
+});

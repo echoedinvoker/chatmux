@@ -502,10 +502,14 @@ extract a serializable subset.
 
 | type | Meaning | `content` shape |
 |------|---------|-----------------|
-| `message` | A new message | `{ type: "text"\|"image"\|"video"\|"audio"\|"sticker"\|"file", text?, media_url?, sticker_id?, file_name? }` |
+| `message` | A new message | `{ type: "text"\|"image"\|"video"\|"audio"\|"sticker"\|"file", text?, media_url?, sticker_id?, package_id?, file_name? }` |
 | `read_receipt` | Read receipt (deferred in v0.2: semantics differ per platform, so support is at the adapter's discretion) | `{ chat_id, read_up_to: timestamp }` |
 | `unsend` | A retracted message | `{ message_id }` |
 | `edit` (optional, since v0.5) | An already-delivered message whose content changed | Same shape as `message` — the **full** new content, not a diff |
+
+**Notes on `message` content:**
+
+- `package_id` is optional: the platform ID of the sticker pack a sticker belongs to. LINE takes it from `contentMetadata.STKPKGID`. Platforms with no sticker-pack concept omit it.
 
 **Notes on `unsend`:**
 

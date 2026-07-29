@@ -751,3 +751,43 @@ describe("resource subscription", () => {
     expect(b).toContain("chat://status");
   });
 });
+
+// ── Phase 3.4（F13）：read_messages 回傳貼圖 id ────────────────────────
+describe("read_messages 的貼圖欄位（Phase 3.4）", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "s1",
+      chat: { platform_id: "cAAA", type: "group", name: "G" },
+      timestamp: 1690000000000,
+      content: { type: "sticker", sticker_id: "14406089", package_id: "1365252" },
+    }));
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "t1",
+      chat: { platform_id: "cAAA", type: "group", name: "G" },
+      timestamp: 1690000001000,
+      content: { type: "text", text: "文字" },
+    }));
+  });
+
+  afterEach(() => db.close());
+
+  test("對貼圖回傳 sticker_id 與 package_id", () => {
+    const res = handleReadMessages(db, { chat_id: "line:cAAA" });
+    const sticker = res.messages.find((m) => m.content.type === "sticker")!;
+    expect(sticker.content.sticker_id).toBe("14406089");
+    expect(sticker.content.package_id).toBe("1365252");
+  });
+
+  test("文字訊息的 content 不夾帶貼圖鍵", () => {
+    const res = handleReadMessages(db, { chat_id: "line:cAAA" });
+    const text = res.messages.find((m) => m.content.type === "text")!;
+    expect("sticker_id" in text.content).toBe(false);
+    expect("package_id" in text.content).toBe(false);
+  });
+});

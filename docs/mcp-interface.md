@@ -132,6 +132,23 @@ Reads messages from one chat, paginated by timestamp (`before` / `after`).
       },
       "edited_at": null,
       "retracted_at": null
+    },
+    {
+      "id": "line:m1234567891",
+      "chat_id": "line:c1234567890abcdef",
+      "sender": {
+        "id": "line:u1234567890abcdef",
+        "display_name": "Alice"
+      },
+      "timestamp": 1690000001000,
+      "content": {
+        "type": "sticker",
+        "text": null,
+        "sticker_id": "14406089",
+        "package_id": "1365252"
+      },
+      "edited_at": null,
+      "retracted_at": null
     }
   ],
   "has_more": true,
@@ -157,6 +174,13 @@ the conversation was three lines long or whether the backfill never reached furt
 
 `backfilling` is in-memory only and overrides the stored state — a daemon that dies
 mid-fetch comes back reporting what it actually knows, never a stale "in progress".
+
+**`sticker_id` / `package_id`** appear only on `content.type = "sticker"`, and only where
+the row has them — a sticker's whole content is which sticker it is, so without them a
+consumer has nothing to render. The keys are omitted rather than sent as `null`: a
+present-but-empty key reads identically to a missing one at the render site, so omission is
+the honest signal. LINE supplies both; a platform without sticker packs sends `sticker_id`
+alone.
 
 **`edited_at` / `retracted_at`** (since v0.5) tell a consumer that a message it may
 already be displaying has changed:

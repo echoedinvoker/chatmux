@@ -187,6 +187,8 @@ CREATE TABLE messages (
   content_type TEXT NOT NULL,
   content_text TEXT,
   content_media_url TEXT,
+  content_sticker_id TEXT,
+  content_sticker_package_id TEXT,
   raw TEXT,
   source TEXT NOT NULL CHECK(source IN ('live', 'backfill')),
   created_at INTEGER NOT NULL DEFAULT (unixepoch('now', 'subsec') * 1000),
@@ -230,6 +232,12 @@ long-lived connection with foreign keys disabled for the rest of the process.
 | `seq` | Event-stream position. Assigned `MAX(seq) + 1` on insert **and again on every change to the row**. This is what `read_events` pages on |
 | `edited_at` | Timestamp of the most recent edit, or NULL |
 | `retracted_at` | Retraction timestamp, or NULL. Non-NULL is the tombstone marker |
+| `content_sticker_id` | Sticker ID for `content_type = 'sticker'` rows, or NULL. LINE takes it from `contentMetadata.STKID` |
+| `content_sticker_package_id` | Sticker pack ID, or NULL. LINE takes it from `contentMetadata.STKPKGID`. Platforms with no pack concept leave it NULL |
+
+The two `content_sticker_*` columns are additive (`ALTER TABLE ADD COLUMN`, guarded by a
+`PRAGMA table_info` check), so an already-migrated database carries them at the end of the
+row rather than in the position shown in the DDL above.
 
 #### `seq` is the cursor; `id` is the row's permanent identity
 

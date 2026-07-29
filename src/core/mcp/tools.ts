@@ -80,7 +80,14 @@ interface MessageOutput {
   chat_id: string;
   sender: { id: string; display_name: string };
   timestamp: number;
-  content: { type: string; text: string | null };
+  content: {
+    type: string;
+    text: string | null;
+    /** Present only on stickers. */
+    sticker_id?: string;
+    /** Present only on stickers, and only where the platform has sticker packs. */
+    package_id?: string;
+  };
   /** Non-null once the message has been edited in place. */
   edited_at: number | null;
   /** Non-null once retracted; content is cleared, so this is how a reader tells a
@@ -147,6 +154,13 @@ function formatMessage(row: MessageRow, db: Database): MessageOutput {
     content: {
       type: row.content_type,
       text: row.content_text,
+      // Spread conditionally: a text message must not carry a `sticker_id: null` key. The
+      // consumer renders `[sticker:${package_id ?? "?"}/${sticker_id ?? "?"}]`, so a
+      // present-but-empty key reads the same as a missing sticker ID.
+      ...(row.content_sticker_id ? { sticker_id: row.content_sticker_id } : {}),
+      ...(row.content_sticker_package_id
+        ? { package_id: row.content_sticker_package_id }
+        : {}),
     },
     edited_at: row.edited_at ?? null,
     retracted_at: row.retracted_at ?? null,

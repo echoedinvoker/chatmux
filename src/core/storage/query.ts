@@ -24,6 +24,8 @@ export interface MessageRow {
   content_type: string;
   content_text: string | null;
   content_media_url: string | null;
+  content_sticker_id: string | null;
+  content_sticker_package_id: string | null;
   source: string;
   seq: number;
   edited_at: number | null;
@@ -97,7 +99,8 @@ export function getMessages(
     return db
       .query<MessageRow, [number, number, number]>(
         `SELECT id, platform, platform_message_id, chat_id, sender_id,
-                timestamp, content_type, content_text, content_media_url, source,
+                timestamp, content_type, content_text, content_media_url,
+              content_sticker_id, content_sticker_package_id, source,
                 seq, edited_at, retracted_at
          FROM messages
          WHERE chat_id = ? AND timestamp < ?
@@ -111,7 +114,8 @@ export function getMessages(
     return db
       .query<MessageRow, [number, number, number]>(
         `SELECT id, platform, platform_message_id, chat_id, sender_id,
-                timestamp, content_type, content_text, content_media_url, source,
+                timestamp, content_type, content_text, content_media_url,
+              content_sticker_id, content_sticker_package_id, source,
                 seq, edited_at, retracted_at
          FROM messages
          WHERE chat_id = ? AND timestamp > ?
@@ -124,7 +128,8 @@ export function getMessages(
   return db
     .query<MessageRow, [number, number]>(
       `SELECT id, platform, platform_message_id, chat_id, sender_id,
-              timestamp, content_type, content_text, content_media_url, source,
+              timestamp, content_type, content_text, content_media_url,
+              content_sticker_id, content_sticker_package_id, source,
                 seq, edited_at, retracted_at
        FROM messages
        WHERE chat_id = ?
@@ -154,7 +159,8 @@ export function getEventsSince(
   return db
     .query<MessageRow, [number, number]>(
       `SELECT id, platform, platform_message_id, chat_id, sender_id,
-              timestamp, content_type, content_text, content_media_url, source,
+              timestamp, content_type, content_text, content_media_url,
+              content_sticker_id, content_sticker_package_id, source,
                 seq, edited_at, retracted_at
        FROM messages
        WHERE seq > ?

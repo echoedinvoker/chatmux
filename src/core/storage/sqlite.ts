@@ -99,6 +99,13 @@ export function initSchema(db: Database): void {
   // After migrateMessageUniqueKey: it rebuilds `messages`, and this one reads that table to
   // recompute last_message_at.
   migrateActivityColumn(db);
+
+  // Also after migrateMessageUniqueKey, and for a sharper reason: that rebuild's
+  // `INSERT INTO messages_new (...) SELECT ...` names its columns explicitly and does not
+  // know about these two. Adding them first would let a database that has not been rebuilt
+  // yet — one restored from a pre-v0.6 backup, say — silently drop the sticker IDs on the
+  // way through the rebuild.
+  migrateStickerColumns(db);
 }
 
 /**
@@ -124,6 +131,25 @@ function migrateChangeColumns(db: Database): void {
 
   db.exec("UPDATE messages SET seq = id WHERE seq IS NULL");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_seq ON messages(seq)");
+}
+
+/**
+ * Sticker identity columns. A sticker's only content is which sticker it is, so without
+ * these the projection keeps the message but loses the message: the consumer renders
+ * `[sticker:?/?]`. `package_id` is separate because platforms address stickers by pack
+ * plus ID, and LINE hands both over in `contentMetadata`.
+ */
+function migrateStickerColumns(db: Database): void {
+  const existing = new Set(
+    db.query<{ name: string }, []>("PRAGMA table_info(messages)").all().map((c) => c.name)
+  );
+
+  if (!existing.has("content_sticker_id")) {
+    db.exec("ALTER TABLE messages ADD COLUMN content_sticker_id TEXT");
+  }
+  if (!existing.has("content_sticker_package_id")) {
+    db.exec("ALTER TABLE messages ADD COLUMN content_sticker_package_id TEXT");
+  }
 }
 
 /**
@@ -436,8 +462,8 @@ function landMessage(db: Database, event: JsonlEvent): boolean {
 
   const insertMessageStmt = db.prepare(`
     INSERT OR IGNORE INTO messages
-    (platform, platform_message_id, chat_id, sender_id, timestamp, content_type, content_text, content_media_url, raw, source, seq)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_SEQ})
+    (platform, platform_message_id, chat_id, sender_id, timestamp, content_type, content_text, content_media_url, content_sticker_id, content_sticker_package_id, raw, source, seq)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_SEQ})
   `);
   const { changes } = insertMessageStmt.run(
     event.platform,
@@ -448,6 +474,8 @@ function landMessage(db: Database, event: JsonlEvent): boolean {
     event.content.type,
     event.content.text ?? null,
     event.content.media_url ?? null,
+    event.content.sticker_id ?? null,
+    event.content.package_id ?? null,
     JSON.stringify(event.raw),
     event.source
   );

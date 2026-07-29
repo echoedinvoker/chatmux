@@ -23,6 +23,8 @@ export interface JsonlEvent {
     type: string;
     text?: string;
     media_url?: string;
+    sticker_id?: string;
+    package_id?: string;
   };
   raw: unknown;
   source: string;

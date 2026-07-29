@@ -74,6 +74,7 @@ export interface AdapterMessageEvent {
     text?: string;
     media_url?: string;
     sticker_id?: string;
+    package_id?: string;
     file_name?: string;
   };
   raw: unknown;
@@ -178,6 +179,7 @@ function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterMessag
   const contentType = resolveContentType(msg.contentType);
   const isSticker = contentType === "sticker";
   const stickerId = isSticker ? msg.contentMetadata?.["STKID"] : undefined;
+  const packageId = isSticker ? msg.contentMetadata?.["STKPKGID"] : undefined;
 
   return {
     type: "message",
@@ -195,6 +197,7 @@ function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterMessag
       type: contentType,
       ...(contentType === "text" ? { text: resolveContentText(msg) } : {}),
       ...(stickerId ? { sticker_id: stickerId } : {}),
+      ...(packageId ? { package_id: packageId } : {}),
       ...(contentType === "text" && !msg.text && CONTENT_TYPE_LABELS[msg.contentType]
         ? { text: CONTENT_TYPE_LABELS[msg.contentType] }
         : {}),
