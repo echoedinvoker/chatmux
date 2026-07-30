@@ -182,6 +182,14 @@ present-but-empty key reads identically to a missing one at the render site, so 
 the honest signal. LINE supplies both; a platform without sticker packs sends `sticker_id`
 alone.
 
+**`media_url`** appears only where the platform gave core a URL that needs **no
+authentication** — anyone can fetch it, and a consumer may cache it freely. On LINE that
+means stickers and nothing else. Its absence on an `image` message is not a gap: most media
+cannot be described as a URL at all (it needs an auth header, or it is end-to-end encrypted
+and only decryptable inside the adapter). **To display media, call `get_media` and open the
+path it returns — do not build a fetch around `media_url`.** The field exists for consumers
+that want to hotlink where hotlinking happens to work.
+
 **`edited_at` / `retracted_at`** (since v0.5) tell a consumer that a message it may
 already be displaying has changed:
 
@@ -417,6 +425,59 @@ log whose deduplication depends on it. Expect a WARN in the daemon log.
   "detail": "LINE adapter is not connected"
 }
 ```
+
+### `get_media`
+
+Resolves one message's media to a **local file path**. A consumer opens the path and is
+done: it never sees a URL, an auth header or an encryption key, and needs no credentials of
+its own. Which of the three fetch paths applies — open CDN, authenticated object store, or
+local decryption — is decided by core and the adapter (see
+[`adapter-protocol.md`](./adapter-protocol.md) §get_media).
+
+Fetching is **lazy**: nothing is downloaded until a consumer asks for it. The first call
+downloads; later calls for the same media are served from disk with no network traffic at
+all.
+
+**Input schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "message_id": { "type": "string", "description": "e.g. 'line:623174375235650150'" }
+  },
+  "required": ["message_id"]
+}
+```
+
+**Example output** (success):
+```json
+{
+  "path": "/home/you/.cache/chatmux/media/line/msg/623174375235650150.jpg",
+  "mime": "image/jpeg"
+}
+```
+
+**Example output** (nothing to show):
+```json
+{ "unavailable": "gone" }
+```
+
+| `unavailable` | Meaning | What a consumer should render |
+|---------------|---------|-------------------------------|
+| `gone` | The platform no longer has it — deleted or expired | An explicit "this is no longer on the platform" label. **Not** a blank space: a consumer that renders nothing turns a platform-side deletion into what looks like a broken client |
+| `needs_key` | The content exists but cannot be decrypted with the keys available | Same idea, worded as unavailable rather than deleted |
+| `unsupported_type` | This platform's adapter does not serve media at all | The existing text label for the content type |
+| `no_adapter` | Core has no such message stored | Nothing new — the consumer is asking about a message it should not have |
+
+A result is never an error. Media that cannot be produced is a normal answer, because the
+consumer's job is the same either way: show the user something honest.
+
+**Caching.** Files live under `$XDG_CACHE_HOME/chatmux/media/` (default
+`~/.cache/chatmux/media/`). Stickers are keyed on the sticker ID, so one sticker sent a
+hundred times is stored once; other media is keyed on the message. The cache is capped
+(200 MB) and evicts by last-read time — an evicted file costs one re-fetch, never a message.
+Failures are remembered too, which is what stops a scroll past deleted media from
+re-hitting the network on every redraw.
 
 ### `get_status`
 

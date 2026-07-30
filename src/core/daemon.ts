@@ -26,9 +26,11 @@ import {
   handleSendMessage,
   handleGetStatus,
   handleProbeLatest,
+  handleGetMedia,
   type SendDeps,
   type ProbeDeps,
 } from "./mcp/tools.js";
+import { MediaCache } from "./media-cache.js";
 import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
 import { needsBackfill, backfillChat, type BackfillDeps } from "./backfill-on-demand.js";
 import { catchUpAdapter } from "./cold-start-catchup.js";
@@ -150,6 +152,25 @@ manager.onError((platform: string, params: unknown) => {
   console.error(`[daemon] [${platform}] adapter error:`, params);
 });
 
+// Media lives under XDG_CACHE_HOME, not the data dir: it is all re-downloadable, so it is
+// cache in the strict sense — losing it costs a re-fetch, never a message.
+const mediaCache = new MediaCache({
+  root: join(
+    process.env.XDG_CACHE_HOME ?? join(process.env.HOME ?? "~", ".cache"),
+    "chatmux/media",
+  ),
+  maxBytes: 200 * 1024 * 1024,
+  callAdapter: (platform, method, params) => manager.sendRequest(platform, method, params),
+  fetchPublicUrl: async (url) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);
+    return {
+      bytes: new Uint8Array(await res.arrayBuffer()),
+      mime: res.headers.get("content-type")?.split(";")[0] ?? "application/octet-stream",
+    };
+  },
+});
+
 function registerTools(server: McpServer): void {
   server.tool(
     "list_chats",
@@ -178,6 +199,18 @@ function registerTools(server: McpServer): void {
     async ({ chat_id, limit, before, after }) => {
       const result = handleReadMessages(db, { chat_id, limit, before, after });
       triggerOnDemandBackfill(chat_id);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    "get_media",
+    "Get a local file path for a message's media (image or sticker). Downloads and caches on first call; later calls hit the cache. Answers { unavailable } when the platform no longer has the content.",
+    {
+      message_id: z.string().describe("Message ID (e.g. 'line:623174375235650150')"),
+    },
+    async ({ message_id }) => {
+      const result = await handleGetMedia(db, mediaCache, { message_id });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );

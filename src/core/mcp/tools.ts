@@ -161,6 +161,11 @@ function formatMessage(row: MessageRow, db: Database): MessageOutput {
       ...(row.content_sticker_package_id
         ? { package_id: row.content_sticker_package_id }
         : {}),
+      // Same conditional spread, same reason: the query has always selected this column
+      // and then dropped it on the floor, so a consumer could not tell a sticker with a
+      // public URL from one without. Only ever a URL needing no auth — see
+      // docs/adapter-protocol.md §event.
+      ...(row.content_media_url ? { media_url: row.content_media_url } : {}),
     },
     edited_at: row.edited_at ?? null,
     retracted_at: row.retracted_at ?? null,
@@ -530,4 +535,74 @@ export async function handleProbeLatest(
   }) as { events: unknown[] };
 
   return { events: result.events };
+}
+
+/** The slice of MediaCache this tool needs — kept narrow so tests can pass a stub. */
+export interface MediaResolver {
+  fetchMedia: (key: {
+    platform: string;
+    messageId: string;
+    chatId: string;
+    raw: unknown;
+    contentType: "image" | "sticker" | "video" | "audio" | "file";
+    stickerId?: string;
+    publicUrl?: string;
+  }) => Promise<unknown>;
+}
+
+/**
+ * Turns a stored message into a local file path a consumer can open.
+ *
+ * The consumer never sees a URL, a header or a key: which of the three fetch paths applies
+ * is decided here and inside the adapter (docs/adapter-protocol.md §get_media).
+ */
+export async function handleGetMedia(
+  db: Database,
+  cache: MediaResolver,
+  params: { message_id: string },
+): Promise<unknown> {
+  const [platform, ...rest] = params.message_id.split(":");
+  const platformMessageId = rest.join(":");
+
+  const row = db
+    .query<
+      {
+        raw: string | null;
+        content_type: string;
+        content_media_url: string | null;
+        content_sticker_id: string | null;
+        chat_platform_id: string;
+      },
+      [string, string]
+    >(
+      `SELECT m.raw AS raw, m.content_type, m.content_media_url, m.content_sticker_id,
+              c.platform_id AS chat_platform_id
+         FROM messages m JOIN chats c ON c.id = m.chat_id
+        WHERE m.platform = ? AND m.platform_message_id = ?`,
+    )
+    .get(platform, platformMessageId);
+
+  // A message core does not store is not an error the consumer can act on — it is simply
+  // media that cannot be produced. Same shape as every other dead end.
+  if (!row) return { unavailable: "no_adapter" };
+
+  let raw: unknown = null;
+  if (row.raw) {
+    try {
+      raw = JSON.parse(row.raw);
+    } catch {
+      // An unparseable raw costs the adapter its context, not the whole request: the obs
+      // path only needs the message id, so let it try.
+    }
+  }
+
+  return await cache.fetchMedia({
+    platform,
+    messageId: platformMessageId,
+    chatId: row.chat_platform_id,
+    raw,
+    contentType: row.content_type as "image" | "sticker" | "video" | "audio" | "file",
+    ...(row.content_sticker_id ? { stickerId: row.content_sticker_id } : {}),
+    ...(row.content_media_url ? { publicUrl: row.content_media_url } : {}),
+  });
 }

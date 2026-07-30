@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { initSchema, syncEventToSQLite } from "../../src/core/storage/sqlite";
 import { initFTS } from "../../src/core/storage/fts";
 import type { JsonlEvent } from "../../src/core/storage/jsonl";
-import { handleListChats, handleReadMessages, handleSearchMessages, handleSendMessage, handleGetStatus } from "../../src/core/mcp/tools";
+import { handleListChats, handleReadMessages, handleSearchMessages, handleSendMessage, handleGetStatus, handleGetMedia } from "../../src/core/mcp/tools";
 import type { OutgoingDraft } from "../../src/core/mcp/tools";
 import { handleResource, ResourceSubscriptionManager } from "../../src/core/mcp/resources";
 import { SafetyRail } from "../../src/core/safety";
@@ -789,5 +789,85 @@ describe("read_messages 的貼圖欄位（Phase 3.4）", () => {
     const text = res.messages.find((m) => m.content.type === "text")!;
     expect("sticker_id" in text.content).toBe(false);
     expect("package_id" in text.content).toBe(false);
+  });
+});
+
+describe("get_media tool", () => {
+  const STICKER_URL =
+    "https://stickershop.line-scdn.net/stickershop/v1/sticker/7432559/android/sticker.png";
+
+  /** Minimal cache stub: proves the tool turned a stored row into the right key. */
+  const fakeCache = (result: unknown) => ({
+    fetchMedia: async (key: any) => {
+      expect(key.platform).toBe("line");
+      expect(key.contentType).toBe("sticker");   // decides sticker/ vs msg/ in the path
+      expect(key.messageId).toBe("m1");          // images key on it; nothing else catches a miss
+      expect(key.stickerId).toBe("7432559");
+      expect(key.publicUrl).toBe(STICKER_URL);
+      return result;
+    },
+  }) as any;
+
+  function seedSticker(): Database {
+    const db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "m1",
+      timestamp: 1690000000000,
+      content: { type: "sticker", sticker_id: "7432559", package_id: "5145", media_url: STICKER_URL },
+      raw: { contentMetadata: { STKID: "7432559", STKPKGID: "5145" } },
+    }));
+    return db;
+  }
+
+  test("resolves a stored sticker row to a cached path", async () => {
+    const db = seedSticker();
+    const res = await handleGetMedia(
+      db,
+      fakeCache({ path: "/c/line/sticker/7432559.png", mime: "image/png" }),
+      { message_id: "line:m1" },
+    );
+    expect(res).toEqual({ path: "/c/line/sticker/7432559.png", mime: "image/png" });
+    db.close();
+  });
+
+  test("answers unavailable rather than throwing for an unknown message", async () => {
+    const db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+    const res = await handleGetMedia(db, fakeCache(null), { message_id: "line:nope" });
+    expect(res).toEqual({ unavailable: "no_adapter" });
+    db.close();
+  });
+});
+
+describe("read_messages: media_url exposure (gap 2b)", () => {
+  test("passes media_url through, and omits the key when there is none", () => {
+    const db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "m1",
+      timestamp: 1690000000000,
+      content: {
+        type: "sticker",
+        sticker_id: "7432559",
+        media_url:
+          "https://stickershop.line-scdn.net/stickershop/v1/sticker/7432559/android/sticker.png",
+      },
+    }));
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "m2",
+      timestamp: 1690000001000,
+      content: { type: "text", text: "hi" },
+    }));
+
+    const res = handleReadMessages(db, { chat_id: "line:c_alice" });
+    const sticker = res.messages.find((m: any) => m.id === "line:m1")!;
+    const text = res.messages.find((m: any) => m.id === "line:m2")!;
+    expect((sticker.content as any).media_url).toContain("7432559");
+    expect("media_url" in (text.content as any)).toBe(false);
+    db.close();
   });
 });
