@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { handleOp, handleSendMessage, handleBackfill, type MessageClient, type AdapterEvent } from "./messages.js";
 import { handleGetContacts, handleGetChats, ContactCache, enrichSenderName, type ContactClient } from "./contacts.js";
 import { login } from "./auth.js";
+import { handleGetMedia, type MediaClient, type GetMediaParams } from "./media.js";
 import {
   createPushSource,
   ConnectionManager,
@@ -223,7 +224,7 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
 }
 
 async function main(): Promise<void> {
-  let lineClient: (MessageClient & ContactClient) | null = null;
+  let lineClient: (MessageClient & ContactClient & MediaClient) | null = null;
   let connection: ConnectionManager | null = null;
   let suspendDetector: SuspendDetector | null = null;
   let contactCache = new ContactCache([], []);
@@ -280,6 +281,13 @@ async function main(): Promise<void> {
   responder.onRequest("backfill", async (params: unknown) => {
     if (!lineClient) throw new Error("Client not initialized");
     return handleBackfill(lineClient, params as any);
+  });
+
+  // protocol v0.8 optional method。沒有 capabilities 宣告——method 級 opt-in
+  // 靠 -32601，照 get_self／get_message_boxes 的既有慣例。
+  responder.onRequest("get_media", async (params: unknown) => {
+    if (!lineClient) throw new Error("Client not initialized");
+    return handleGetMedia(lineClient, params as GetMediaParams);
   });
 
   responder.onRequest("get_contacts", async () => {
@@ -352,6 +360,14 @@ async function main(): Promise<void> {
       },
       async sendCompactMessage(to: string, text: string) {
         return client.base.talk.sendCompactMessage({ to, text });
+      },
+      // F35：get_media 的兩條網路路徑。isSquare 對 talk 訊息必須是 false
+      // （實驗確認 g2 路徑對 talk 訊息一律 404）。
+      async downloadMessageData(messageId: string) {
+        return client.base.obs.downloadMessageData({ messageId, isSquare: false });
+      },
+      async downloadMediaByE2EE(message: any) {
+        return client.base.obs.downloadMediaByE2EE(message);
       },
       async getPreviousMessages(chatMid: string, count: number, before?: { deliveredTime: bigint; messageId: bigint }) {
         let endMessageId: any;

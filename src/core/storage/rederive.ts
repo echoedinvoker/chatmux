@@ -141,3 +141,51 @@ export function rederiveStickers(
 
   return stats;
 }
+
+/**
+ * Fills `content_media_url` on sticker rows that have none.
+ *
+ * Same shape and same reason as `rederiveStickers`: `derive` is injected because the URL
+ * is built from LINE's `STKID`, and core does not know any platform's metadata keys.
+ *
+ * The candidate set is narrowed to stickers on purpose. Under adapter protocol v0.8
+ * `media_url` means "an unauthenticated, directly-linkable public URL", and on LINE only
+ * stickers qualify — images live behind obs headers or local E2EE keys and are fetched
+ * through `get_media` instead. Widening this WHERE to all media rows would invite a
+ * caller to backfill a URL that no consumer can actually open.
+ */
+export function rederiveMediaUrl(
+  db: Database,
+  derive: (raw: unknown) => string | null,
+): RederiveStats {
+  const rows = db
+    .query<{ id: number; raw: string | null }, []>(
+      `SELECT id, raw FROM messages
+        WHERE content_type = 'sticker' AND content_media_url IS NULL`,
+    )
+    .all();
+
+  const update = db.prepare("UPDATE messages SET content_media_url = ? WHERE id = ?");
+
+  const stats: RederiveStats = { scanned: rows.length, updated: 0, skipped: 0 };
+
+  for (const row of rows) {
+    let url: string | null = null;
+    try {
+      url = row.raw == null ? null : derive(JSON.parse(row.raw));
+    } catch {
+      // One unreadable payload must not abort the other 228.
+      url = null;
+    }
+
+    if (!url) {
+      stats.skipped++;
+      continue;
+    }
+
+    update.run(url, row.id);
+    stats.updated++;
+  }
+
+  return stats;
+}

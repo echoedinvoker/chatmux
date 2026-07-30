@@ -1,8 +1,9 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { initSchema } from "../../src/core/storage/sqlite";
-import { rederiveStickers, rederiveText } from "../../src/core/storage/rederive";
+import { rederiveStickers, rederiveText, rederiveMediaUrl } from "../../src/core/storage/rederive";
 import { deriveProjection, extractSticker } from "../../src/adapters/line/content-text";
+import { stickerStaticUrl } from "../../src/adapters/line/media";
 
 function seed(): Database {
   const db = new Database(":memory:");
@@ -227,4 +228,24 @@ test("e2eeVersion 在頂層時同樣被認出來", () => {
     "SELECT content_text FROM messages WHERE platform_message_id='e2ee_toplevel'"
   ).get();
   expect(row.content_text).toBe("[無法解密]");
+});
+
+// ── F35 Phase 3.6：存量貼圖的 media_url 回填 ──────────────────────────
+test("從 raw 回填貼圖 media_url，壞 raw 跳過，且冪等", () => {
+  const db = seed();   // 本檔既有 helper：ok / nullraw / badjson 三筆
+  const derive = (raw: any) => stickerStaticUrl(raw?.contentMetadata?.STKID);
+
+  const first = rederiveMediaUrl(db, derive);
+  expect(first.scanned).toBe(3);
+  expect(first.updated).toBe(1);
+  expect(first.skipped).toBe(2);
+
+  const row = db.query<any, []>(
+    "SELECT content_media_url u FROM messages WHERE platform_message_id='ok'",
+  ).get();
+  expect(row.u).toBe(
+    "https://stickershop.line-scdn.net/stickershop/v1/sticker/14406089/android/sticker.png",
+  );
+
+  expect(rederiveMediaUrl(db, derive).updated).toBe(0);   // 冪等
 });

@@ -5,6 +5,7 @@ import {
   resolveContentType,
   retractionTimestamp,
 } from "./content-text.js";
+import { stickerStaticUrl } from "./media.js";
 
 export interface RawMessage {
   from: string;
@@ -181,6 +182,9 @@ function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterMessag
   const isSticker = contentType === "sticker";
   const stickerId = isSticker ? msg.contentMetadata?.["STKID"] : undefined;
   const packageId = isSticker ? msg.contentMetadata?.["STKPKGID"] : undefined;
+  // protocol v0.8：media_url = 免認證、任何人可直連的公開 URL。
+  // LINE 只有貼圖符合；圖片（obs／E2EE）一律走 get_media，不填這欄。
+  const mediaUrl = isSticker ? stickerStaticUrl(stickerId) : null;
 
   return {
     type: "message",
@@ -197,6 +201,7 @@ function msgToEvent(msg: RawMessage, myMid: string, raw: unknown): AdapterMessag
     content: {
       type: contentType,
       ...(contentType === "text" ? { text: resolveContentText(msg) } : {}),
+      ...(mediaUrl ? { media_url: mediaUrl } : {}),
       ...(stickerId ? { sticker_id: stickerId } : {}),
       ...(packageId ? { package_id: packageId } : {}),
       ...(contentType === "text" && !msg.text && CONTENT_TYPE_LABELS[msg.contentType]

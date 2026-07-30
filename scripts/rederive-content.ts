@@ -13,8 +13,9 @@ import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { initSchema } from "../src/core/storage/sqlite";
-import { rederiveStickers, rederiveText } from "../src/core/storage/rederive";
+import { rederiveStickers, rederiveText, rederiveMediaUrl } from "../src/core/storage/rederive";
 import { deriveProjection, extractSticker } from "../src/adapters/line/content-text";
+import { stickerStaticUrl } from "../src/adapters/line/media";
 
 const dbPath =
   process.argv[2] ?? join(homedir(), ".local/share/chatmux/chatmux.db");
@@ -33,6 +34,10 @@ initSchema(db);
 // come back as `skipped`, which is the correct outcome, not a failure.
 const stickers = rederiveStickers(db, extractSticker);
 const texts = rederiveText(db, deriveProjection);
+// F35: only stickers get a `media_url` — under protocol v0.8 the column means an
+// unauthenticated, directly-linkable URL, and LINE's images have none. Telegram's sticker
+// rows carry no STKID, so they come back as `skipped` rather than a bad URL.
+const mediaUrls = rederiveMediaUrl(db, (raw: any) => stickerStaticUrl(raw?.contentMetadata?.STKID));
 
 console.log(`db: ${dbPath}`);
 console.log(
@@ -40,6 +45,9 @@ console.log(
 );
 console.log(
   `texts: scanned=${texts.scanned} updated=${texts.updated} skipped=${texts.skipped}`,
+);
+console.log(
+  `media_urls: scanned=${mediaUrls.scanned} updated=${mediaUrls.updated} skipped=${mediaUrls.skipped}`,
 );
 
 db.close();

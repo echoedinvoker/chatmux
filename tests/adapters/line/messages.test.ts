@@ -734,6 +734,33 @@ describe("msgToEvent — 貼圖欄位（Phase 3.2）", () => {
     expect(ev!.content.sticker_id).toBe("1");
     expect("package_id" in ev!.content).toBe(false);
   });
+
+  // ── F35 Phase 3.2：貼圖是 LINE 唯一符合 v0.8 media_url 語意的來源 ──
+  it("貼圖事件帶得出免認證的 media_url", async () => {
+    const ev = (await handleOp(
+      stickerOp({ STKID: "7432559", STKPKGID: "5145", STKVER: "1" }),
+      stubClient,
+      () => {},
+    )) as AdapterMessageEvent | null;
+
+    expect(ev!.content.media_url).toBe(
+      "https://stickershop.line-scdn.net/stickershop/v1/sticker/7432559/android/sticker.png",
+    );
+  });
+
+  it("圖片不填 media_url——它走 get_media，不是公開 URL", async () => {
+    const imageOp = {
+      type: "RECEIVE_MESSAGE",
+      message: {
+        from: "uOTHER", to: "uSELF", toType: "USER", id: "10",
+        createdTime: 1n, text: "", contentType: "IMAGE", contentMetadata: {},
+      },
+    };
+    const ev = (await handleOp(imageOp, stubClient, () => {})) as AdapterMessageEvent | null;
+
+    expect(ev!.content.type).toBe("image");
+    expect("media_url" in ev!.content).toBe(false);
+  });
 });
 
 // ── Phase 4.1（F13）：resolveContentText 依 metadata 分流 ──────────────
