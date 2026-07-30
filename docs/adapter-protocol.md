@@ -144,6 +144,11 @@ message and therefore does not list `"edit"` — an adapter declares only what i
 actually supports. The Telegram adapter reports
 `["message", "edit", "unsend"]`.
 
+⚠️ One declaration is currently untrue: the LINE adapter lists `read_receipt` but never
+constructs the event. See the README's Limitations for why that is accepted for now — the
+short version is that no consumer branches on `supported_events` yet. Do not treat this
+field as verified until one does.
+
 `platform_rate_limits` is optional. When reported, core's SafetyRail takes whichever is
 stricter — its own default or the adapter's value. **An adapter can only tighten, never
 loosen**; the core floor is the safety net.

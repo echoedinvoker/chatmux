@@ -557,7 +557,9 @@ subscriber re-reading after a push sees an edit or retraction only if the affect
 message is still inside that window. A consumer whose buffer has grown past N will miss
 the update for anything older, with no signal that it did. Re-opening the chat or paging
 with `read_messages` returns the correct `edited_at` / `retracted_at` and repairs the
-state.
+state. The fix for a consumer that needs those changes as they happen is `read_events`
+(above), not a larger `limit` — the window is the wrong shape for the problem, whatever
+size it is.
 
 ### `chat://chats/{id}/info`
 
@@ -631,4 +633,6 @@ Both return identical shapes, so a client can pick whichever matches its capabil
 
 For a consumer that must not miss events, neither path is sufficient on its own — use
 `read_events` with a persisted cursor, and treat subscription purely as a latency hint.
-`examples/notifier/` implements exactly that.
+`examples/notifier/` implements exactly that, and chat.nvim's sidecar now follows the same
+pattern — it did not at first, and the result was precisely the silent gap described under
+`chat://chats/{id}/messages` above.

@@ -117,6 +117,31 @@ bun run start   # Start daemon
 
 See `docs/` for detailed architecture and protocol documentation.
 
+## Limitations
+
+Known and accepted, with what would make each worth revisiting.
+
+- **`get_contacts` fails once on every cold start.** One `AdapterProtocolError` line in the log.
+  Sender names still resolve — the adapter falls back to its entity cache — so the failure is
+  noise rather than damage. Worth a look if it starts appearing outside cold start, or if sender
+  resolution actually begins to fail.
+- **The chat list caps at 1000, silently.** `chat://chats` is hard-coded to that limit. Consumers
+  can detect an overflow by comparing the `total` field against what arrived, so it will not bite
+  you without saying so. Worth raising once a vault approaches ~500 chats, or the first time that
+  completeness check fires.
+- **The JSONL log holds duplicate history.** Backfill re-ingested some messages many times over,
+  leaving the event log several times larger than the messages in it. This has stopped: recent
+  growth is almost entirely new distinct messages, and the worst-case duplicate count has been
+  frozen across repeated measurements. It is not a correctness problem — ingestion is idempotent
+  and the SQLite projection is unaffected — so the fix, if ever needed, is a one-off compaction
+  rather than a code change. Worth doing if the log passes ~500 MB, if the duplicate count starts
+  climbing again, or if cold start slows noticeably.
+- **`read_receipt` is declared but never emitted.** The LINE adapter advertises the capability and
+  core is ready to ingest it; nothing constructs the event. Whether read state should reach a UI
+  at all is an open product question, not a pending bug — but the declaration is wrong today, so
+  do not branch on `supported_events` for this one. Worth fixing as soon as any consumer does
+  branch on it, or once that product question gets an answer.
+
 ## ⚠️ Account Risk Warning
 
 This project uses **@evex/linejs**, an unofficial LINE client library. Using unofficial APIs may violate LINE's Terms of Service. Your LINE account may be restricted, suspended, or permanently banned. **Use at your own risk.**
