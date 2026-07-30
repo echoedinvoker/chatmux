@@ -1,6 +1,6 @@
 # Adapter Protocol
 
-> **Protocol version**: 0.7.1
+> **Protocol version**: 0.8
 > **Validated against**: LINE (v0.1, v0.4, v0.5, v0.6, v0.7, v0.7.1), Telegram (v0.2, v0.3, v0.4, v0.5, v0.6, v0.7.1 — still sends the deprecated `last_message_at` name, which core accepts as an alias)
 > **Changelog**: at the bottom of this document
 
@@ -294,6 +294,82 @@ lands self-sent messages under the sentinel `platform_id: "self"` instead of dro
 An adapter that maintains a contact cache should register itself there while handling this
 request, so its own messages resolve to a real name rather than a raw account ID.
 
+### `get_media` (optional)
+
+> **Optional since v0.8.** An adapter that does not support it replies with JSON-RPC error
+> `-32601` (Method not found). Core matches on `error.code` only — same convention as
+> §get_message_boxes and §get_self — and remembers the refusal for the whole platform
+> instead of asking again for every message.
+
+Returns the **bytes** of one message's media attachment. This exists because
+`content.media_url` can only describe media that anyone can fetch from a plain URL, and on
+a real platform most media is not like that: it may need an auth header, or it may be
+end-to-end encrypted and only decryptable by the process that holds the keys. Rather than
+teach every consumer those platform specifics, the protocol keeps them where the
+credentials already live — inside the adapter — and moves bytes instead of instructions.
+
+Core calls it lazily, when a consumer actually asks to see the media, and caches the result
+on local disk. An adapter should therefore treat each call as a one-off fetch and must not
+assume core will call it once per message lifetime.
+
+**Request params:**
+```json
+{
+  "platform_message_id": "623174375235650150",
+  "chat_id": "u1234567890abcdef",
+  "raw": { "...the original payload this adapter sent with the event..." }
+}
+```
+
+`chat_id` is the raw `platform_id`, without a `platform:` prefix — same as everywhere else.
+
+`raw` is whatever the adapter itself put in the `event` notification's `raw` field, handed
+back verbatim. **Core does not parse it**; it stores it and returns it. Two consequences an
+adapter must design for:
+
+- ⚠️ **`raw` is not byte-identical to what was sent.** It has been through a JSON
+  round-trip, so anything that is not plain JSON has changed representation — a `Buffer`
+  comes back as `{"type":"Buffer","data":[…]}`, and some encoders emit a string instead.
+  An adapter that reads binary out of `raw` must normalize both shapes. Assuming one of
+  them fails on a subset of messages, and the failure looks like "the platform would not
+  give me the media" rather than "my own deserialization is wrong".
+- An adapter that omitted `raw` on its events gets `null` here, and should answer from
+  `platform_message_id` alone or report `unavailable`.
+
+**Response result** (success):
+```json
+{
+  "bytes_base64": "<base64-encoded bytes>",
+  "mime": "image/jpeg",
+  "file_name": "photo.jpg"
+}
+```
+
+`file_name` is optional.
+
+**Response result** (the media cannot be produced — still a *successful* response, not an error):
+```json
+{ "unavailable": "gone" }
+```
+
+| `unavailable` | Meaning | Core's caching |
+|---------------|---------|----------------|
+| `gone` | The platform no longer has the content: deleted, expired, or the object store reports it does not exist | **Permanent.** Core will not ask again |
+| `needs_key` | The content exists but this adapter cannot decrypt it (a shared key it never received, for instance) | Permanent for that message |
+| `unsupported_type` | This content type has no retrievable media | Permanent for that message |
+
+⚠️ **Report a missing object as `unavailable`, not as a JSON-RPC error.** The distinction is
+the whole point: `unavailable` means *asking again will not help*, so core stops asking. A
+thrown error means *this attempt failed*, so core retries later. An adapter that throws for
+deleted media makes every consumer scroll trigger a fresh network call that can only fail
+again; an adapter that reports `unavailable` for a transient network blip permanently hides
+media that is still there.
+
+⚠️ **Do not require a fresh login.** This method must work from credentials the adapter
+already holds. On LINE all three media shapes do — the sticker CDN needs no auth, the
+object store accepts the stored access token, and E2EE images decrypt from local keys — so
+nothing here should ever cost the user a re-authentication.
+
 ### `send_message`
 
 Sends a message through the platform. Core has already run SafetyRail checks before
@@ -533,6 +609,7 @@ extract a serializable subset.
 **Notes on `message` content:**
 
 - `package_id` is optional: the platform ID of the sticker pack a sticker belongs to. LINE takes it from `contentMetadata.STKPKGID`. Platforms with no sticker-pack concept omit it.
+- `media_url` (since v0.8) means one specific thing: **a public URL that anyone can fetch with no authentication, and that any consumer may cache.** No header, no token, no cookie, no local key. Media that needs any of those **must not** be described with this field — expose it through §get_media instead and leave `media_url` absent. Filling it in with a URL that only works for the adapter is worse than leaving it empty: a consumer will try the URL, get a 401 or 403, and report the media as broken. On LINE only stickers qualify (the sticker CDN is open); photos need either the stored access token or local decryption, so they carry no `media_url` at all.
 
 **Notes on `unsend`:**
 
@@ -721,6 +798,27 @@ A valid adapter is a standalone program in any language that only needs to:
 ---
 
 ## Changelog
+
+### v0.8 — media moves as bytes, not as instructions
+
+`content.media_url` carried an assumption that does not survive contact with a real
+platform: that every attachment has a URL a consumer can just fetch. On LINE it holds for
+stickers and for nothing else — photos need an auth header, and end-to-end encrypted photos
+need keys that exist only inside the adapter process. Fifty-eight of the ninety-eight LINE
+photos in a real store are E2EE; for those there is no URL to hand out at all.
+
+The alternative we rejected was to widen the field — add a "how to fetch this" kind plus a
+header bag — and let consumers execute the recipe. That pushes one platform's auth scheme
+into a cross-platform protocol, obliges every consumer to implement all three fetch paths,
+and takes credentials out of the one process that is supposed to own them. Moving bytes
+instead keeps the platform specifics behind the adapter boundary, where they already are.
+
+| Change | Rationale |
+|--------|-----------|
+| New optional method §get_media: given a message, return its media bytes, or `unavailable` with a reason | Lets an adapter serve media it can only fetch with its own credentials, or only decrypt locally, without publishing either to consumers. Optional via `-32601`, the same opt-in mechanism as v0.3's `get_message_boxes` and v0.4's `get_self`, so existing adapters need no change |
+| `unavailable` is a *successful* result, not a JSON-RPC error, with a fixed value set (`gone` / `needs_key` / `unsupported_type`) | Core has to tell "asking again cannot help" apart from "this attempt failed", and only the adapter knows which it is. Collapsing both into an error means every consumer scroll re-fetches media that was deleted months ago |
+| §event: `media_url` is narrowed to "public, unauthenticated, cacheable by anyone" — authenticated or encrypted media must leave it absent | The old wording did not say, so an adapter could reasonably put a token-gated URL there. A consumer then fetches it, gets 403, and shows the media as broken — a failure that looks like a consumer bug and is invisible to the adapter author |
+| §get_media: `raw` is passed back verbatim and is explicitly **not** byte-identical to what was sent | A JSON round-trip rewrites anything non-JSON, and `Buffer` in particular comes back in more than one shape. An adapter that assumes a single shape fails on a subset of messages, and the symptom — "the platform will not give me the media" — points away from the actual bug |
 
 ### v0.7.1 — what "no anchor" and "nothing older" mean
 
