@@ -123,20 +123,60 @@ client.base.on("update:authtoken", async (token) => {
 | authToken | `data/auth.json` | `$CHATMUX_DATA_DIR/adapters/line/auth.json` |
 | E2EE storage | `data/storage.json` | `$CHATMUX_DATA_DIR/adapters/line/storage.json` |
 
-## LINE OBS media downloads
+## Media: three source shapes, one method
 
-URLs for LINE images, video, and audio (OBS URLs) require an auth header and expire.
+LINE media does not arrive one way. It arrives three ways, and they have nothing in
+common except that a picture comes out the other end. The numbers below are from a full
+run over the stored backlog on 2026-07-30 — every row was actually fetched and the bytes
+checked with `file`, not sampled and extrapolated.
 
-### Strategy
+| Source | How to fetch | What it needs | Result |
+|---|---|---|---|
+| Sticker | `GET https://stickershop.line-scdn.net/stickershop/v1/sticker/<STKID>/android/sticker.png` | Nothing. No header, no session | 220/220 |
+| Image · obs | `client.base.obs.downloadMessageData({ messageId, isSquare: false })` | The stored `authToken` (sent as `x-Line-access`). **No login session** | 22/40 |
+| Image · `DOWNLOAD_URL` | Plain `GET` on `raw.contentMetadata.DOWNLOAD_URL` | Nothing. Bot and official-account messages only | 15/15 |
+| Image · E2EE | `client.base.obs.downloadMediaByE2EE(message)` | Local keys already in `storage.json`. Zero `client.talk` calls | 46/53 |
+| Gone | — | — | 8–10, `status: "notexist"` or 0 bytes |
 
-Download to local disk as soon as a media message arrives:
+Two things follow, and both matter more than they look:
 
-```
-image/video/audio/file message received
-  → download immediately to $CHATMUX_DATA_DIR/media/line/<message_id>.<ext>
-  → record original_url + local_path in the SQLite attachments table
-  → MCP tools return local_path, never the expired original_url
-```
+- **None of this needs a fresh login.** The whole pipeline runs off credentials the
+  adapter already holds. If a change ever seems to require re-logging in, that is a
+  signal the wrong API is being used — not a cost to pay. The IOSIPAD slot is single
+  occupancy (see above), so a re-login is the most expensive thing in this codebase.
+- **`media_url` cannot express this.** Under adapter protocol v0.8 that field means "an
+  unauthenticated, directly-linkable public URL", and on LINE only stickers qualify.
+  Everything else goes through the optional `get_media` method, which hands core the
+  bytes and keeps the token and the E2EE keys inside this process. Consumers only ever
+  see a local path.
+
+`isSquare` must stay `false` for talk messages — the `g2` path 404s on every one of them.
+
+### Two silent failure modes, both live in this path
+
+Neither of these throws where the mistake is. Both surface as "the media cannot be
+fetched", which points at LINE instead of at us.
+
+**1. `getStickerURL` splits animated from static on the wrong condition.** linejs's own
+helper (`client/features/message/talk.ts:162`) treats `STKOPT === "A"` as the animated
+case. Measured against the backlog, `STKOPT === "AS"` also carries an APNG — one sample
+was 409KB of animation. Copying that helper therefore drops the animation for every `AS`
+sticker without an error anywhere; the correct predicate is `STKOPT ∈ {A, AS}`.
+
+`src/adapters/line/media.ts` does not import or copy it. It builds the static URL only,
+with no `STKOPT` branch at all — a branch that does not exist cannot be wrong. Animated
+stickers are a known gap, not an accident.
+
+**2. `raw.chunks` is not uniformly serialised.** Of 53 stored E2EE messages, 34 have
+chunks that are all `{type:"Buffer",data:[…]}` and 19 have plain strings mixed in. Doing
+`Buffer.from(c.data)` on every element throws `The first argument must be of type
+string, Buffer... Received undefined` on those 19 — a message that reads like E2EE being
+unavailable rather than like our own reconstruction being wrong. The first spike drew
+exactly that conclusion and nearly wrote off half the feature.
+
+`normalizeChunks` passes strings through untouched, because linejs converts them itself
+(`base/e2ee/mod.ts:758,838,902`). The general lesson is worth more than the fix: **when a
+spike reports failure, suspect your own code before you suspect the platform.**
 
 ## Content type mapping
 

@@ -637,6 +637,51 @@ swallow another's messages — the same shape as the per-platform unique key bug
 "is not swallowed" direction.
 
 
+## Media cache
+
+Media lives outside the database, under `$XDG_CACHE_HOME/chatmux/media` (falling back to
+`~/.cache`). Cache, not data, and the distinction is load-bearing: every byte in here can
+be fetched again from the platform, so losing the directory costs one re-download and
+never costs a message. That is why it does not sit beside `chatmux.db` in
+`CHATMUX_DATA_DIR`, which holds things that cannot be reconstructed.
+
+```
+~/.cache/chatmux/media/
+├── line/
+│   ├── sticker/<STKID>.png              ← keyed by sticker, deduped across messages
+│   └── msg/<platform_message_id>.<ext>  ← images are per-message
+└── negative.json                        ← { "<key>": { reason, at, permanent } }
+```
+
+**Stickers are keyed by `STKID`, not by message id.** 229 sticker messages in the backlog
+resolve to 153 distinct stickers; keying by message would store the same picture ten times
+for a sticker sent ten times.
+
+`<ext>` comes from the MIME type. E2EE images have none — linejs builds the decrypted
+`File` locally without one — so they all land as `.bin`. That is cosmetic: consumers
+detect format from magic bytes, not from the extension.
+
+### Failures are cached too, by kind
+
+Without this, every scroll past a deleted image is a fresh network request that is
+guaranteed to fail again. The kinds are not interchangeable:
+
+| Failure | Cached for | Why |
+|---|---|---|
+| `object_info.status == "notexist"`, or obs returns 0 bytes | Forever | The platform deleted it. It is not coming back |
+| Network error, timeout, 5xx | 24 hours | Transient by assumption; retrying tomorrow is reasonable |
+| Adapter answers `-32601` | Forever, for that whole platform | The adapter does not implement `get_media` at all. Asking about a different message cannot produce a different answer |
+
+`negative.json` is bookkeeping rather than content, so LRU eviction skips it.
+
+### Size
+
+Measured against the current backlog: 153 stickers at 6–22 KB plus 98 images at roughly
+300 KB each comes to about 32 MB. The ceiling is **200 MB**, evicted by `atime` LRU —
+roughly six times the current footprint, which leaves room to grow without ever needing a
+migration. Eviction is safe by construction: an evicted file is re-fetched the next time
+someone looks at it.
+
 ## Capacity estimate
 
 For personal usage of roughly 1000 messages per day:

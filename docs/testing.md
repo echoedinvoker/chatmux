@@ -23,7 +23,16 @@ Every behavior in these modules is written test-first:
 ### What is not test-first
 
 - The LINE adapter's platform API calls — mocking them costs more than it is worth; integration tests cover this.
+  - This covers `get_media`'s three fetch paths (sticker CDN, obs, E2EE decrypt). What *is*
+    unit-tested is everything around them: URL construction, `chunks` normalisation, and
+    which path a payload routes to — all pure functions in `src/adapters/line/media.ts`.
+    Splitting "which route" from "how to fetch" is deliberate: a routing mistake and a
+    network failure look identical from the outside, and only one of them is ours.
 - `daemon.ts` entry assembly — pure wiring, covered by integration tests.
+  - Worth stating plainly, because Phase 2 of F35 nearly shipped without it: the media
+    cache's unit tests all inject fake `callAdapter`/`fetchPublicUrl`, so a fully green
+    suite says nothing about whether the real dependencies were ever wired into the real
+    daemon. Wiring is verified end to end, never by the unit tests passing.
 - systemd service configuration.
 
 ## Test layout
@@ -49,12 +58,15 @@ tests/
 │   ├── cold-start-catchup.test.ts # catch-up loop: termination, priority, outcomes
 │   ├── land-backfill.test.ts    # backfill reads SQLite before it writes JSONL
 │   ├── mcp-server.test.ts       # Transport: TCP + unix socket listeners
-│   └── mcp-tools.test.ts        # MCP tools + resources
+│   ├── mcp-tools.test.ts        # MCP tools + resources
+│   ├── media-cache.test.ts      # cache keys/paths, negative cache by kind, LRU, hits
+│   └── rederive-content.test.ts # backfilling projection columns from stored raw
 ├── adapters/
 │   └── line/
 │       ├── messages.test.ts          # handleEvent + E2EE decrypt (from line-tui)
 │       ├── contacts.test.ts          # contact fetch + cache (from line-tui)
 │       ├── adapter-responder.test.ts # adapter-side JSON-RPC request handler
+│       ├── media.test.ts             # sticker URL, chunks normalisation, source routing
 │       └── connection.test.ts        # ConnectionManager (from line-tui)
 ├── examples/
 │   ├── boundary.test.ts         # NEVER #11: examples/ must not import src/
