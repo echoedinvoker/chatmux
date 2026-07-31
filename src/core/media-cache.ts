@@ -25,12 +25,17 @@ export interface MediaKey {
 
 export type MediaResult =
   | { path: string; mime: string }
-  | { unavailable: "gone" | "needs_key" | "unsupported_type" | "no_adapter" };
+  | { unavailable: "gone" | "needs_key" | "unsupported_type" | "no_adapter" | "timeout" };
 
 export interface MediaCacheOptions {
   root: string;
   maxBytes?: number;
-  callAdapter: (platform: string, method: string, params: unknown) => Promise<unknown>;
+  callAdapter: (
+    platform: string,
+    method: string,
+    params: unknown,
+    opts?: { timeoutMs?: number },
+  ) => Promise<unknown>;
   fetchPublicUrl: (url: string) => Promise<{ bytes: Uint8Array; mime: string }>;
   /** Injectable clock so TTL tests do not wait 24 hours. */
   now?: () => number;
@@ -39,8 +44,25 @@ export interface MediaCacheOptions {
 import { mkdir, readdir, readFile, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+/**
+ * AdapterProtocol rejects a timed-out request with a plain Error, so the message is the
+ * only signal there is. Matched narrowly rather than on "timeout" alone: an adapter is free
+ * to throw its own errors mentioning the word.
+ */
+function isTimeout(err: unknown): boolean {
+  return /timeout after \d+ms$/.test((err as { message?: string } | null)?.message ?? "");
+}
+
 /** JSON-RPC "Method not found" — an adapter that does not implement get_media at all. */
 const METHOD_NOT_FOUND = -32601;
+
+/**
+ * Downloading bytes is not a normal request. Measured 2026-07-31: a Telegram video refetch
+ * takes 39.8s and a small file 19.4s, against the 30s every adapter request used to share —
+ * so videos always failed. The default stays short on purpose: a wedged adapter should say
+ * so in seconds, not minutes.
+ */
+const MEDIA_TIMEOUT_MS = 180_000;
 
 /** How long a *transient* failure is trusted before core tries the source again. */
 const TRANSIENT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -166,11 +188,16 @@ export class MediaCache {
 
     let answer: unknown;
     try {
-      answer = await this.callAdapter(key.platform, "get_media", {
-        platform_message_id: key.messageId,
-        chat_id: key.chatId,
-        raw: key.raw,
-      });
+      answer = await this.callAdapter(
+        key.platform,
+        "get_media",
+        {
+          platform_message_id: key.messageId,
+          chat_id: key.chatId,
+          raw: key.raw,
+        },
+        { timeoutMs: MEDIA_TIMEOUT_MS },
+      );
     } catch (err: unknown) {
       // Deliberately reading `err.code` rather than using adapter-runner's
       // isMethodNotFound(): callAdapter is injected, so what it throws is not
@@ -179,7 +206,12 @@ export class MediaCache {
         this.unsupportedPlatforms.add(key.platform);
         return { unavailable: "unsupported_type" };
       }
-      // A thrown error means *this attempt* failed, so it expires — unlike an
+      // Running out of time is not evidence of absence — the same rule F34 fixed for
+      // has_more. Reporting it as "gone" told the reader the video had been deleted, and
+      // writing it to negative.json made that lie stick for TRANSIENT_TTL_MS: the retry
+      // that would have succeeded never happened. A timeout is remembered nowhere.
+      if (isTimeout(err)) return { unavailable: "timeout" };
+      // Any other thrown error means *this attempt* failed, so it expires — unlike an
       // `unavailable` answer, which is the adapter saying asking again cannot help.
       await this.rememberNegative(negKey, { reason: "gone", at: this.now(), permanent: false });
       return { unavailable: "gone" };

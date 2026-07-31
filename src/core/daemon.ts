@@ -160,7 +160,8 @@ const mediaCache = new MediaCache({
     "chatmux/media",
   ),
   maxBytes: 200 * 1024 * 1024,
-  callAdapter: (platform, method, params) => manager.sendRequest(platform, method, params),
+  callAdapter: (platform, method, params, opts) =>
+    manager.sendRequest(platform, method, params, opts),
   fetchPublicUrl: async (url) => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`fetch ${url}: ${res.status}`);

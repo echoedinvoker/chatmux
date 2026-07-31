@@ -100,10 +100,15 @@ export class AdapterManager {
     await Promise.all(stops);
   }
 
-  sendRequest(platform: string, method: string, params: unknown): Promise<unknown> {
+  sendRequest(
+    platform: string,
+    method: string,
+    params: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<unknown> {
     const runner = this.runners.get(platform);
     if (!runner) throw new Error(`Unknown platform: ${platform}`);
-    return runner.sendRequest(method, params);
+    return runner.sendRequest(method, params, opts);
   }
 
   getRunner(platform: string): AdapterRunner | undefined {

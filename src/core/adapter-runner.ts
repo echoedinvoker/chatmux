@@ -241,9 +241,18 @@ export class AdapterRunner {
     this.crashKillSwitch.reset();
   }
 
-  async sendRequest(method: string, params: unknown): Promise<unknown> {
+  /**
+   * opts.timeoutMs overrides the default for callers whose work is legitimately slow —
+   * fetching media, mainly. The default stays short so a wedged adapter is reported in
+   * seconds; raising it globally would make every broken request take minutes to fail.
+   */
+  async sendRequest(
+    method: string,
+    params: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<unknown> {
     if (!this.protocol) throw new Error("Adapter not running");
-    return this.protocol.request(method, params, { timeoutMs: 30_000 });
+    return this.protocol.request(method, params, { timeoutMs: opts?.timeoutMs ?? 30_000 });
   }
 
   private async spawnAndInitialize(): Promise<void> {

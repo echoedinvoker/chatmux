@@ -262,3 +262,53 @@ describe("MediaCache: disk budget", () => {
     expect(calls).toEqual(["gone1"]);
   });
 });
+
+describe("MediaCache: fetching bytes gets more time than a normal request", () => {
+  // Measured 2026-07-31: a Telegram video refetch takes 39.8s, a small file 19.4s, while
+  // every adapter request shared one 30s deadline. Videos therefore always failed — and
+  // failed as "gone", which told the reader the video had been deleted.
+  it("asks the adapter for a longer deadline than the 30s default", async () => {
+    const root = `/tmp/f38-deadline-${Math.random().toString(36).slice(2)}`;
+    let seen: { timeoutMs?: number } | undefined;
+    const cache = new MediaCache({
+      root, maxBytes: 1e6,
+      callAdapter: async (_p, _m, _params, opts) => {
+        seen = opts;
+        return { bytes_base64: Buffer.from([1, 2, 3]).toString("base64"), mime: "video/mp4" };
+      },
+      fetchPublicUrl: async () => { throw new Error("must not be called"); },
+    });
+
+    await cache.fetchMedia({
+      platform: "telegram", messageId: "20588", chatId: "-1002638600055", raw: {}, contentType: "video",
+    });
+
+    expect(seen?.timeoutMs).toBeGreaterThan(30_000);
+  });
+
+  it("reports a timeout as a timeout, and does not remember it as gone", async () => {
+    // The distinction is not cosmetic. "gone" is written to negative.json with a 24h TTL,
+    // so one slow download used to mean that attachment answered "已不存在於 Telegram"
+    // instantly for a whole day — the retry that would have worked never happened. Same
+    // rule as F34's has_more: running out of time is not evidence of absence.
+    const root = `/tmp/f38-timeout-${Math.random().toString(36).slice(2)}`;
+    let calls = 0;
+    const make = () => new MediaCache({
+      root, maxBytes: 1e6,
+      callAdapter: async () => {
+        calls++;
+        throw new Error("Request get_media (id=7) timeout after 180000ms");
+      },
+      fetchPublicUrl: async () => { throw new Error("must not be called"); },
+    });
+    const key = {
+      platform: "telegram", messageId: "20591", chatId: "-1002638600055", raw: {}, contentType: "video" as const,
+    };
+
+    expect(await make().fetchMedia(key)).toEqual({ unavailable: "timeout" });
+    // A fresh instance over the same root is what a daemon restart looks like: the second
+    // ask must reach the adapter again rather than being answered from a remembered "gone".
+    expect(await make().fetchMedia(key)).toEqual({ unavailable: "timeout" });
+    expect(calls).toBe(2);
+  });
+});
