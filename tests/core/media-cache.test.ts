@@ -3,16 +3,97 @@ import { MediaCache, mediaCachePath } from "../../src/core/media-cache.js";
 
 describe("mediaCachePath", () => {
   it("keys stickers by sticker id so one sticker is stored once", () => {
-    expect(mediaCachePath("/c", { platform: "line", contentType: "sticker", stickerId: "7432559", messageId: "1" }, "image/png"))
+    expect(mediaCachePath("/c", { platform: "line", contentType: "sticker", stickerId: "7432559", messageId: "1", chatId: "c1" }, "image/png"))
       .toBe("/c/line/sticker/7432559.png");
   });
-  it("keys images by message id", () => {
-    expect(mediaCachePath("/c", { platform: "line", contentType: "image", messageId: "623174375235650150" }, "image/jpeg"))
-      .toBe("/c/line/msg/623174375235650150.jpg");
+  it("keys images by chat and message id", () => {
+    expect(mediaCachePath("/c", { platform: "line", contentType: "image", messageId: "623174375235650150", chatId: "Cabc" }, "image/jpeg"))
+      .toBe("/c/line/msg/Cabc/623174375235650150.jpg");
   });
   it("falls back to .bin for a mime it does not know", () => {
-    expect(mediaCachePath("/c", { platform: "line", contentType: "image", messageId: "9" }, "application/octet-stream"))
-      .toBe("/c/line/msg/9.bin");
+    expect(mediaCachePath("/c", { platform: "line", contentType: "image", messageId: "9", chatId: "Cabc" }, "application/octet-stream"))
+      .toBe("/c/line/msg/Cabc/9.bin");
+  });
+});
+
+describe("cache keys carry the chat (F45)", () => {
+  const base = { platform: "telegram", contentType: "image" as const };
+
+  it("puts the same message id in two chats on two different files", () => {
+    const a = mediaCachePath("/c", { ...base, messageId: "19245", chatId: "-1001782953277" }, "image/jpeg");
+    const b = mediaCachePath("/c", { ...base, messageId: "19245", chatId: "8546705305" }, "image/jpeg");
+    expect(a).not.toBe(b);
+    expect(a).toContain("/telegram/msg/");
+    expect(a.endsWith("/19245.jpg")).toBe(true);
+  });
+
+  it("keys a sticker on the sticker id, not the chat", () => {
+    const a = mediaCachePath("/c", { platform: "line", contentType: "sticker", messageId: "m1", stickerId: "7432559", chatId: "cA" }, "image/png");
+    const b = mediaCachePath("/c", { platform: "line", contentType: "sticker", messageId: "m2", stickerId: "7432559", chatId: "cB" }, "image/png");
+    expect(a).toBe(b);
+    expect(a).toBe("/c/line/sticker/7432559.png");
+  });
+
+  it("never lets a chat id escape the cache root", () => {
+    const p = mediaCachePath("/c", { ...base, messageId: "1", chatId: "../../etc" }, "image/jpeg");
+    expect(p.startsWith("/c/telegram/msg/")).toBe(true);
+    expect(p).not.toContain("/../");
+    expect(p.split("/").includes("..")).toBe(false);
+  });
+
+  it("does not let one chat's negative memory silence the other", async () => {
+    const tmp = `/tmp/f45-negchat-${Math.random().toString(36).slice(2)}`;
+    const cache = new MediaCache({
+      root: tmp, maxBytes: 1e6,
+      callAdapter: async () => ({ unavailable: "unsupported_type" }),
+      fetchPublicUrl: async () => { throw new Error("no"); },
+    });
+    const first = await cache.fetchMedia({
+      platform: "telegram", messageId: "19245", chatId: "8546705305", raw: {}, contentType: "image",
+    });
+    expect(first).toEqual({ unavailable: "unsupported_type" });
+
+    let asked = false;
+    // A fresh instance over the same root is what a daemon restart looks like: it reads the
+    // negative.json the first one wrote, so this proves the *persisted* key carries the chat.
+    const cache2 = new MediaCache({
+      root: tmp, maxBytes: 1e6,
+      callAdapter: async () => {
+        asked = true;
+        return { bytes_base64: Buffer.from("x").toString("base64"), mime: "image/jpeg" };
+      },
+      fetchPublicUrl: async () => { throw new Error("no"); },
+    });
+    const second = await cache2.fetchMedia({
+      platform: "telegram", messageId: "19245", chatId: "-1001782953277", raw: {}, contentType: "image",
+    });
+    expect(asked).toBe(true);
+    expect("path" in second).toBe(true);
+  });
+
+  it("answers from disk for the right chat only", async () => {
+    const tmp = `/tmp/f45-hit-${Math.random().toString(36).slice(2)}`;
+    let adapterCalls = 0;
+    const cache = new MediaCache({
+      root: tmp, maxBytes: 1e6,
+      callAdapter: async () => {
+        adapterCalls++;
+        return { bytes_base64: Buffer.from("y").toString("base64"), mime: "image/jpeg" };
+      },
+      fetchPublicUrl: async () => { throw new Error("no"); },
+    });
+    const inChat = (chatId: string) => ({
+      platform: "telegram", messageId: "19245", chatId, raw: {}, contentType: "image" as const,
+    });
+
+    const a: any = await cache.fetchMedia(inChat("-100A"));
+    const again: any = await cache.fetchMedia(inChat("-100A"));
+    expect(again.path).toBe(a.path);
+    expect(adapterCalls).toBe(1);          // second call came off disk
+
+    const other: any = await cache.fetchMedia(inChat("-100B"));
+    expect(other.path).not.toBe(a.path);   // the other chat did not inherit that file
+    expect(adapterCalls).toBe(2);
   });
 });
 
@@ -110,7 +191,7 @@ describe("MediaCache: adapter bytes land on disk", () => {
     };
 
     const first: any = await cache.fetchMedia(key);
-    expect(first.path).toBe(`${root}/line/msg/623174375235650150.jpg`);
+    expect(first.path).toBe(`${root}/line/msg/c/623174375235650150.jpg`);
     expect(first.mime).toBe("image/jpeg");
     expect(new Uint8Array(await Bun.file(first.path).arrayBuffer())).toEqual(JPEG);
 

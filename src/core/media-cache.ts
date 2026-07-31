@@ -68,22 +68,38 @@ function mimeForExt(fileName: string): string {
 }
 
 /**
+ * One path segment standing for a chat.
+ *
+ * encodeURIComponent already guarantees no `/`, so a chat id cannot add a directory level.
+ * `.` is encoded on top of that so no chat id can ever *be* `.` or `..` — a platform is free
+ * to hand us those, and they would otherwise walk out of the cache root.
+ *
+ * Exported because the one-off migration (scripts/migrate-media-cache-chat-key.ts) has to
+ * produce byte-identical segments; a second copy of this rule would silently strand files.
+ */
+export function safeChatSegment(chatId: string): string {
+  return encodeURIComponent(chatId).replace(/\./g, "%2E");
+}
+
+/**
  * Where one piece of media lives on disk.
  *
  * Stickers are keyed on the sticker id, not the message id: the same sticker is sent over
  * and over, and keying on the message would store one copy per send. Everything else is
- * keyed on the message, because the bytes belong to that message alone.
+ * keyed on the message *and its chat*: a platform message id is only unique within a chat
+ * (see docs/storage-schema.md), so keying on the id alone made two unrelated messages share
+ * one file.
  */
 export function mediaCachePath(
   root: string,
-  key: Pick<MediaKey, "platform" | "contentType" | "messageId" | "stickerId">,
+  key: Pick<MediaKey, "platform" | "contentType" | "messageId" | "stickerId" | "chatId">,
   mime: string,
 ): string {
   const ext = MIME_EXT[mime] ?? "bin";
   if (key.contentType === "sticker" && key.stickerId) {
     return `${root}/${key.platform}/sticker/${key.stickerId}.${ext}`;
   }
-  return `${root}/${key.platform}/msg/${key.messageId}.${ext}`;
+  return `${root}/${key.platform}/msg/${safeChatSegment(key.chatId)}/${key.messageId}.${ext}`;
 }
 
 export class MediaCache {
@@ -201,7 +217,7 @@ export class MediaCache {
       const rel = `${key.platform}/sticker/${key.stickerId}.png`;
       return (await this.has(rel)) ? { path: `${this.root}/${rel}`, mime: "image/png" } : null;
     }
-    const dir = `${this.root}/${key.platform}/msg`;
+    const dir = `${this.root}/${key.platform}/msg/${safeChatSegment(key.chatId)}`;
     let entries: string[];
     try {
       entries = await readdir(dir);
@@ -221,11 +237,15 @@ export class MediaCache {
     return { path, mime };
   }
 
-  /** Negative entries are keyed the same way files are, so a sticker is remembered once. */
+  /**
+   * Negative entries are keyed the same way files are, so a sticker is remembered once and a
+   * message is remembered per chat. Keeping the two key shapes identical is what stops a
+   * "cannot fetch" memory from applying to a different message that happens to share an id.
+   */
   private negativeKey(key: MediaKey): string {
     return key.contentType === "sticker" && key.stickerId
       ? `${key.platform}/sticker/${key.stickerId}`
-      : `${key.platform}/msg/${key.messageId}`;
+      : `${key.platform}/msg/${safeChatSegment(key.chatId)}/${key.messageId}`;
   }
 
   private get negativePath(): string {
