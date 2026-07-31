@@ -297,9 +297,15 @@ Consequences:
   `platform:platform_message_id`. A cursor is a *position*, not an identity, which is
   why it is emitted as an opaque token (`evt:<seq>`).
 - **That external identity is unique only within a chat**, since the underlying constraint
-  is. Nothing currently takes a message ID as *input* to look a row up (only
-  `send_message` returns one, alongside `chat_id`), so it is sufficient today — but any
-  future tool that accepts a message ID must take the chat with it.
+  is. So any tool that accepts a message ID must take the chat with it. `get_media` is the
+  tool that does — it takes an optional `chat_id`, and when the id is ambiguous without one
+  it refuses rather than guessing (see `mcp-interface.md` §get_media).
+  ⚠️ This paragraph used to read "Nothing currently takes a message ID as *input*… so it is
+  sufficient today". `get_media` was added after that sentence and did not take the chat with
+  it, which is exactly the failure the sentence warned about (F45): core matched whichever row
+  came first, asked the adapter about the wrong chat's message, and remembered the failure
+  permanently under a chat-less key. Stating a rule is not applying it — when this fact
+  changes anything, sweep the dependency points (`docs/platform-facts.md`).
 - Rebuilding SQLite from JSONL replays the same file order, so `id` values are
   reproducible across a rebuild.
 
@@ -649,7 +655,7 @@ never costs a message. That is why it does not sit beside `chatmux.db` in
 ~/.cache/chatmux/media/
 ├── line/
 │   ├── sticker/<STKID>.png              ← keyed by sticker, deduped across messages
-│   └── msg/<platform_message_id>.<ext>  ← images are per-message
+│   └── msg/<chat>/<platform_message_id>.<ext>   ← per message, and per chat (F45)
 └── negative.json                        ← { "<key>": { reason, at, permanent } }
 ```
 

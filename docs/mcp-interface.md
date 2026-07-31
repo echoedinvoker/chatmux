@@ -443,16 +443,35 @@ all.
 {
   "type": "object",
   "properties": {
-    "message_id": { "type": "string", "description": "e.g. 'line:623174375235650150'" }
+    "message_id": { "type": "string", "description": "e.g. 'line:623174375235650150'" },
+    "chat_id": { "type": "string", "description": "Chat the message belongs to, e.g. 'telegram:-1001782953277'. Required on platforms where message ids repeat across chats — see docs/platform-facts.md" }
   },
   "required": ["message_id"]
 }
 ```
 
+**`chat_id` is optional in the schema and required in practice on some platforms.** A message
+id names a message only together with its chat (`platform-facts.md` fact 1). What core does
+when it is missing:
+
+| Situation | Behaviour | Remembers a failure? |
+|---|---|---|
+| `chat_id` given, one row matches | Fetch normally | Yes, under the correct per-chat key |
+| `chat_id` given, no row matches | `{ unavailable: "no_adapter" }` | **No** — returns before the cache is touched |
+| No `chat_id`, only one row has that id | Fetch normally (LINE's usual case) | Yes |
+| No `chat_id`, several rows but exactly one carries media | Use that row, log a warning | Yes |
+| No `chat_id`, still ambiguous | `{ unavailable: "no_adapter" }` + warning | **No** |
+
+The last row is the important one. Guessing produces a wrong answer *and* records it: a
+`gone`/`unsupported_type` reply from the adapter is remembered **permanently**, so one wrong
+guess makes a real image unreachable until someone edits `negative.json` by hand. That is
+F45's actual damage — 46 permanent entries accumulated in half a day. Refusing costs one
+blank image on one render, so core refuses.
+
 **Example output** (success):
 ```json
 {
-  "path": "/home/you/.cache/chatmux/media/line/msg/623174375235650150.jpg",
+  "path": "/home/you/.cache/chatmux/media/line/msg/u1234/623174375235650150.jpg",
   "mime": "image/jpeg"
 }
 ```
@@ -467,14 +486,16 @@ all.
 | `gone` | The platform no longer has it — deleted or expired | An explicit "this is no longer on the platform" label. **Not** a blank space: a consumer that renders nothing turns a platform-side deletion into what looks like a broken client |
 | `needs_key` | The content exists but cannot be decrypted with the keys available | Same idea, worded as unavailable rather than deleted |
 | `unsupported_type` | This platform's adapter does not serve media at all | The existing text label for the content type |
-| `no_adapter` | Core has no such message stored | Nothing new — the consumer is asking about a message it should not have |
+| `no_adapter` | Core has no such message stored, **or** the id is ambiguous without a `chat_id` and core refused to guess | Nothing new — the consumer is asking about a message it should not have, or should pass `chat_id`. Refusing costs one blank image; guessing wrong is remembered permanently |
 
 A result is never an error. Media that cannot be produced is a normal answer, because the
 consumer's job is the same either way: show the user something honest.
 
 **Caching.** Files live under `$XDG_CACHE_HOME/chatmux/media/` (default
 `~/.cache/chatmux/media/`). Stickers are keyed on the sticker ID, so one sticker sent a
-hundred times is stored once; other media is keyed on the message. The cache is capped
+hundred times is stored once; other media is keyed on the **chat and** the message — a
+message id alone is not unique (F45), and keying on it alone made two unrelated messages
+share one file and one "cannot fetch" memory. The cache is capped
 (200 MB) and evicts by last-read time — an evicted file costs one re-fetch, never a message.
 Failures are remembered too, which is what stops a scroll past deleted media from
 re-hitting the network on every redraw.

@@ -339,7 +339,10 @@ adapter must design for:
   them fails on a subset of messages, and the failure looks like "the platform would not
   give me the media" rather than "my own deserialization is wrong".
 - An adapter that omitted `raw` on its events gets `null` here, and should answer from
-  `platform_message_id` alone or report `unavailable`.
+  `platform_message_id` **together with `chat_id`** (both are always in the request) or report
+  `unavailable`. On platforms where message ids restart per chat — Telegram does — the id alone
+  names a different message in every chat, so an adapter that ignores `chat_id` will
+  confidently fetch the wrong thing (F45).
 
 **Response result** (success):
 ```json
@@ -633,7 +636,9 @@ extract a serializable subset.
 - `sender` is not required — core ignores it for `edit`, since the target row already has one.
 - **Rapid repeated edits are expected and must all be delivered.** A streaming bot rewrites the same message many times within seconds. Core does not deduplicate `edit` events, so an adapter must not coalesce or drop them either.
 - Core's projection rules, for adapter authors reasoning about what a consumer will see: an edit whose target does not exist is logged and ignored (no ghost row is created); an edit whose target is already retracted is refused (retraction is terminal); an edit identical to the stored state is a no-op that does not advance the event stream.
-- **Text only, today.** Core drops an `edit` without `content.text`, so caption edits on media messages are not carried through.
+- **`content.text` must be a string.** Core drops an `edit` without one at the ingest boundary (`ingest.ts`), before storage ever sees it — so this is a validation rule, not a projection detail.
+- **Caption edits on media messages do land** (corrected 2026-07-31; this line used to say they were "not carried through"). The adapter's job is to send `content.text: ""` rather than omitting it when a caption was cleared — see `chatmux-adapter-telegram/events.py:119` (`evt["content"].setdefault("text", "")`). `content.type` stays whatever it was, so the edit changes the caption without disturbing media the consumer already holds; core stores the new text on the media row and a consumer renders it beside the media placeholder (chat.nvim does since F44). Verified end to end on Telegram pmid 21966: `content_text` = "F40 S3 已編輯的 caption", `content_type` still `image`.
+- An `edit` cannot change a message's media, only its text.
 
 **Core's event ingest contract:**
 
