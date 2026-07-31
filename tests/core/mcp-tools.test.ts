@@ -842,6 +842,95 @@ describe("get_media tool", () => {
   });
 });
 
+describe("get_media disambiguates by chat (F45)", () => {
+  function seedCollision(): Database {
+    const db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+    // Telegram numbers messages per dialog, so one id can name two different messages.
+    syncEventToSQLite(db, makeEvent({
+      platform: "telegram",
+      platform_message_id: "19245",
+      chat: { platform_id: "8546705305", type: "direct", name: "DM" },
+      content: { type: "text", text: "just text" },
+    }));
+    syncEventToSQLite(db, makeEvent({
+      platform: "telegram",
+      platform_message_id: "19245",
+      chat: { platform_id: "-1001782953277", type: "group", name: "Group" },
+      content: { type: "image" },
+    }));
+    return db;
+  }
+
+  test("with chat_id, resolves the row in that chat", async () => {
+    const db = seedCollision();
+    let seen: any = null;
+    const cache = { fetchMedia: async (key: any) => { seen = key; return { path: "/c/x.jpg", mime: "image/jpeg" }; } } as any;
+    const res = await handleGetMedia(db, cache, {
+      message_id: "telegram:19245",
+      chat_id: "telegram:-1001782953277",
+    });
+    expect(seen.chatId).toBe("-1001782953277");
+    expect(seen.contentType).toBe("image");
+    expect(res).toEqual({ path: "/c/x.jpg", mime: "image/jpeg" });
+    db.close();
+  });
+
+  test("with a chat_id that has no such message, answers unavailable without touching the cache", async () => {
+    const db = seedCollision();
+    let called = false;
+    const cache = { fetchMedia: async () => { called = true; return { path: "/nope", mime: "x" }; } } as any;
+    const res = await handleGetMedia(db, cache, {
+      message_id: "telegram:19245",
+      chat_id: "telegram:does-not-exist",
+    });
+    expect(res).toEqual({ unavailable: "no_adapter" });
+    expect(called).toBe(false);   // never reached the cache ⇒ cannot have written a negative
+    db.close();
+  });
+
+  test("without chat_id, picks the only media-bearing row", async () => {
+    const db = seedCollision();
+    let seen: any = null;
+    const cache = { fetchMedia: async (key: any) => { seen = key; return { path: "/c/x.jpg", mime: "image/jpeg" }; } } as any;
+    await handleGetMedia(db, cache, { message_id: "telegram:19245" });
+    expect(seen.chatId).toBe("-1001782953277");
+    db.close();
+  });
+
+  test("without chat_id and still ambiguous, refuses rather than guessing", async () => {
+    const db = seedCollision();
+    // A third row, also media: now no single row is the obvious answer.
+    syncEventToSQLite(db, makeEvent({
+      platform: "telegram",
+      platform_message_id: "19245",
+      chat: { platform_id: "-100999", type: "group", name: "Other" },
+      content: { type: "image" },
+    }));
+    let called = false;
+    const cache = { fetchMedia: async () => { called = true; return { path: "/nope", mime: "x" }; } } as any;
+    const res = await handleGetMedia(db, cache, { message_id: "telegram:19245" });
+    expect(res).toEqual({ unavailable: "no_adapter" });
+    expect(called).toBe(false);
+    db.close();
+  });
+
+  test("a lone row still resolves without chat_id (LINE's existing behaviour)", async () => {
+    const db = new Database(":memory:");
+    initSchema(db);
+    initFTS(db);
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "m1",
+      content: { type: "image" },
+    }));
+    const cache = { fetchMedia: async () => ({ path: "/c/m1.jpg", mime: "image/jpeg" }) } as any;
+    const res = await handleGetMedia(db, cache, { message_id: "line:m1" });
+    expect(res).toEqual({ path: "/c/m1.jpg", mime: "image/jpeg" });
+    db.close();
+  });
+});
+
 describe("read_messages: media_url exposure (gap 2b)", () => {
   test("passes media_url through, and omits the key when there is none", () => {
     const db = new Database(":memory:");

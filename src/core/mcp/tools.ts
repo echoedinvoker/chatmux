@@ -556,15 +556,19 @@ export interface MediaResolver {
  * The consumer never sees a URL, a header or a key: which of the three fetch paths applies
  * is decided here and inside the adapter (docs/adapter-protocol.md §get_media).
  */
+const MEDIA_CONTENT_TYPES = new Set(["image", "sticker", "video", "audio", "file"]);
+
 export async function handleGetMedia(
   db: Database,
   cache: MediaResolver,
-  params: { message_id: string },
+  params: { message_id: string; chat_id?: string },
 ): Promise<unknown> {
   const [platform, ...rest] = params.message_id.split(":");
   const platformMessageId = rest.join(":");
 
-  const row = db
+  // A message id is unique only within a chat (docs/storage-schema.md §message identity),
+  // so this can legitimately return several rows on Telegram: one id, several dialogs.
+  const rows = db
     .query<
       {
         raw: string | null;
@@ -580,10 +584,16 @@ export async function handleGetMedia(
          FROM messages m JOIN chats c ON c.id = m.chat_id
         WHERE m.platform = ? AND m.platform_message_id = ?`,
     )
-    .get(platform, platformMessageId);
+    .all(platform, platformMessageId);
+
+  const row = pickRow(rows, platform, platformMessageId, params.chat_id);
 
   // A message core does not store is not an error the consumer can act on — it is simply
   // media that cannot be produced. Same shape as every other dead end.
+  //
+  // Refusing an ambiguous id lands here too, and that is the point: this returns before
+  // the cache is touched, so an id we cannot place can never be remembered as permanently
+  // unavailable. Being wrong once beats being wrong forever.
   if (!row) return { unavailable: "no_adapter" };
 
   let raw: unknown = null;
@@ -605,4 +615,51 @@ export async function handleGetMedia(
     ...(row.content_sticker_id ? { stickerId: row.content_sticker_id } : {}),
     ...(row.content_media_url ? { publicUrl: row.content_media_url } : {}),
   });
+}
+
+type MediaRow = {
+  raw: string | null;
+  content_type: string;
+  content_media_url: string | null;
+  content_sticker_id: string | null;
+  chat_platform_id: string;
+};
+
+/**
+ * Decides which of several same-id rows the caller meant, or refuses.
+ *
+ * A caller that names the chat always gets that chat or nothing. A caller that does not
+ * gets an answer only while one is unmistakable: a single row, or a single row carrying
+ * media among text siblings. Anything less certain is refused, because the alternative —
+ * guessing — is what taught the cache to record another chat's message as gone forever.
+ */
+function pickRow(
+  rows: MediaRow[],
+  platform: string,
+  platformMessageId: string,
+  chatId?: string,
+): MediaRow | undefined {
+  if (chatId) {
+    // Same shape read_messages accepts, so a consumer can pass its own chat id straight through.
+    const [, ...chatParts] = chatId.split(":");
+    const chatPlatformId = chatParts.join(":");
+    return rows.find((r) => r.chat_platform_id === chatPlatformId);
+  }
+
+  if (rows.length <= 1) return rows[0];
+
+  const mediaRows = rows.filter((r) => MEDIA_CONTENT_TYPES.has(r.content_type));
+  if (mediaRows.length === 1) {
+    console.error(
+      `[tools] get_media ${platform}:${platformMessageId} matched ${rows.length} chats with no chat_id; ` +
+        `using the only media row (chat ${mediaRows[0]!.chat_platform_id}). Pass chat_id to be sure.`,
+    );
+    return mediaRows[0];
+  }
+
+  console.error(
+    `[tools] get_media ${platform}:${platformMessageId} is ambiguous: ${rows.length} chats, ` +
+      `${mediaRows.length} of them media. Refusing rather than guessing — pass chat_id.`,
+  );
+  return undefined;
 }

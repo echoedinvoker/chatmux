@@ -208,9 +208,10 @@ function registerTools(server: McpServer): void {
     "Get a local file path for a message's media (image or sticker). Downloads and caches on first call; later calls hit the cache. Answers { unavailable } when the platform no longer has the content.",
     {
       message_id: z.string().describe("Message ID (e.g. 'line:623174375235650150')"),
+      chat_id: z.string().optional().describe("Chat ID the message belongs to (e.g. 'telegram:-1001782953277'). Required on platforms where message ids repeat across chats — see docs/platform-facts.md"),
     },
-    async ({ message_id }) => {
-      const result = await handleGetMedia(db, mediaCache, { message_id });
+    async ({ message_id, chat_id }) => {
+      const result = await handleGetMedia(db, mediaCache, { message_id, chat_id });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
