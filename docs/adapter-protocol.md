@@ -317,6 +317,20 @@ Core calls it lazily, when a consumer actually asks to see the media, and caches
 on local disk. An adapter should therefore treat each call as a one-off fetch and must not
 assume core will call it once per message lifetime.
 
+**Deadline: 180s, unlike every other request's 30s.** Downloading bytes is not comparable
+to answering a question, and the shared 30s was measured to be the wrong shape entirely:
+2026-07-31, on a real vault, a Telegram video refetch took 39.8s and a small file 19.4s —
+so every video request timed out, always, while small files sat just inside the limit. An
+adapter may take its time here; it may not take its time on `backfill` or `get_self`.
+
+⚠️ **A timeout is not an `unavailable` answer, and core no longer treats it as one.** It
+used to collapse a thrown timeout into `{"unavailable": "gone"}` and write that to
+`negative.json` with a 24-hour TTL — so one slow download made that attachment report
+"deleted from the platform" instantly for the rest of the day, and the retry that would
+have succeeded never happened. Timeouts now surface as `timeout` and are remembered
+nowhere. The general rule this instance of: **running out of time is evidence about the
+clock, not about the world.**
+
 **Request params:**
 ```json
 {
@@ -365,6 +379,10 @@ adapter must design for:
 | `gone` | The platform no longer has the content: deleted, expired, or the object store reports it does not exist | **Permanent.** Core will not ask again |
 | `needs_key` | The content exists but this adapter cannot decrypt it (a shared key it never received, for instance) | Permanent for that message |
 | `unsupported_type` | This content type has no retrievable media | Permanent for that message |
+
+Core adds one reason of its own, which **an adapter never sends**: `timeout`, when the
+request passed the 180s deadline above. It is remembered nowhere — see the warning under
+the deadline note.
 
 ⚠️ **Report a missing object as `unavailable`, not as a JSON-RPC error.** The distinction is
 the whole point: `unavailable` means *asking again will not help*, so core stops asking. A

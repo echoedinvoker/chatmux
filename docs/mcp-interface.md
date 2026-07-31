@@ -462,6 +462,11 @@ when it is missing:
 | No `chat_id`, several rows but exactly one carries media | Use that row, log a warning | Yes |
 | No `chat_id`, still ambiguous | `{ unavailable: "no_adapter" }` + warning | **No** |
 
+One reason never comes from an adapter: `timeout`, produced by core when `get_media` passes
+its 180s deadline. It is deliberately **not** remembered — unlike `gone`, which it used to
+be reported as. A timeout is a statement about how long this attempt took, and caching it
+as absence made a fetchable video claim to be deleted for 24 hours, retry included.
+
 The last row is the important one. Guessing produces a wrong answer *and* records it: a
 `gone`/`unsupported_type` reply from the adapter is remembered **permanently**, so one wrong
 guess makes a real image unreachable until someone edits `negative.json` by hand. That is
