@@ -35,6 +35,24 @@ Every behavior in these modules is written test-first:
     daemon. Wiring is verified end to end, never by the unit tests passing.
 - systemd service configuration.
 
+## The gate is `bun test`, not `tsc`
+
+There is no `typecheck` script — `package.json` has `start`, `dev` and `test` only — and
+`bunx tsc --noEmit` has **never** been clean on this repo. On a stashed working tree it
+reports 32 errors: `qrcode-terminal` has no type declarations (`src/adapters/line/auth.ts`),
+two `unknown[]` values are passed where `SQLQueryBindings` is expected (`src/core/mcp/tools.ts`,
+`src/core/storage/query.ts`), and the rest are `string | null` arguments inside `tests/`.
+
+So do not write "typecheck passes" into a plan's acceptance criteria — it cannot pass, and a
+plan that requires it stops on its first step. The honest condition is **"no new errors"**:
+
+```
+bunx tsc --noEmit 2>&1 | wc -l     # 32 on a clean tree, 2026-07-31
+```
+
+Compare the count before and after, and check that no error line names a file you touched.
+Fixing the existing 32 is its own task, not a tax on unrelated work.
+
 ## Test layout
 
 ```
