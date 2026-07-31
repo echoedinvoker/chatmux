@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { listChats, getMessages, searchMessages, getStatus, getEventsSince, getHeadSeq, resolveChatInternalId, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
+import { listChats, getMessages, searchMessages, countSearchMessages, getStatus, getEventsSince, getHeadSeq, resolveChatInternalId, type ChatRow, type MessageRow, type SearchResult } from "../storage/query.js";
 import type { SafetyRail } from "../safety.js";
 import type { JsonlEvent } from "../storage/jsonl.js";
 import { isInFlight } from "../backfill-on-demand.js";
@@ -342,24 +342,28 @@ export function handleSearchMessages(
   const limit = params.limit ?? 20;
   const offset = params.offset ?? 0;
 
-  let rows = searchMessages(db, params.query, { limit: 1000 });
-
+  let chatId: number | undefined;
   if (params.chat_id) {
     const internalId = resolveChatInternalId(db, params.chat_id);
+    // An unknown chat has no results; answering with the whole DB instead would be worse.
     if (internalId == null) {
       return { results: [], total: 0, limit, offset };
     }
-    rows = rows.filter(r => r.chat_id === internalId);
+    chatId = internalId;
   }
 
-  if (params.platform) {
-    rows = rows.filter(r => r.platform === params.platform);
-  }
+  // Filters go into the SQL, not over the results. Taking the newest 1000 rows and then
+  // filtering meant a chat-scoped search silently lost every match older than that cut —
+  // and "find the thing someone said" is made of exactly those old matches.
+  const filter = {
+    ...(chatId != null ? { chatId } : {}),
+    ...(params.platform ? { platform: params.platform } : {}),
+  };
 
-  const total = rows.length;
-  const paged = rows.slice(offset, offset + limit);
+  const rows = searchMessages(db, params.query, { ...filter, limit, offset });
+  const total = countSearchMessages(db, params.query, filter);
 
-  const results: SearchResultOutput[] = paged.map(r => {
+  const results: SearchResultOutput[] = rows.map(r => {
     const chatRow = db.query<{ platform: string; platform_id: string; name: string | null }, [number]>(
       "SELECT platform, platform_id, name FROM chats WHERE id = ?"
     ).get(r.chat_id)!;

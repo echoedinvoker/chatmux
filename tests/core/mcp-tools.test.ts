@@ -396,6 +396,39 @@ describe("search_messages tool", () => {
     expect(result.results).toHaveLength(0);
     expect(result.total).toBe(0);
   });
+
+  test("chat-scoped search must not be truncated by an inner cap", () => {
+    for (let i = 0; i < 1200; i++) {
+      syncEventToSQLite(db, makeEvent({
+        platform_message_id: `noise_${i}`,
+        chat: { platform_id: "c_noise", type: "direct", name: "Noise" },
+        sender: { platform_id: "u_noise", display_name: "Noise" },
+        timestamp: 1690000000000 + i * 1000,
+        content: { type: "text", text: `午餐第${i}天` },
+      }));
+    }
+    // The needle is the oldest matching row overall, so a cap applied before the chat
+    // filter drops it — which is what "search my chat" is asking for in the first place.
+    syncEventToSQLite(db, makeEvent({
+      platform_message_id: "needle",
+      chat: { platform_id: "c_needle", type: "direct", name: "Needle" },
+      sender: { platform_id: "u_needle", display_name: "Needle" },
+      timestamp: 1680000000000,
+      content: { type: "text", text: "午餐在這裡" },
+    }));
+
+    const out = handleSearchMessages(db, {
+      query: "午餐",
+      chat_id: "line:c_needle",
+      limit: 20,
+    });
+
+    expect(out.total).toBe(1);
+    expect(out.results.length).toBe(1);
+    expect(out.results[0].message.content.text).toBe("午餐在這裡");
+    expect(out.results[0].snippet).toBeDefined();
+    expect(out.results[0].chat_name).toBeDefined();
+  });
 });
 
 describe("send_message tool", () => {

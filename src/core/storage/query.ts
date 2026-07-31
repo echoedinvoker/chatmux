@@ -52,40 +52,109 @@ export interface StatusResult {
   newest_message_at: number | null;
 }
 
+export interface SearchFilter {
+  chatId?: number;
+  platform?: string;
+}
+
+/**
+ * The WHERE fragment both search branches — and the count — share.
+ *
+ * Kept in one place on purpose: the filter has to appear in the LIKE query, the FTS query
+ * and the count query, and three copies of the same predicate is three things that drift.
+ * Everything is prefixed `m.` so the fragment drops into either branch unchanged.
+ */
+function searchFilterSql(opts?: SearchFilter): {
+  extra: string;
+  args: (string | number)[];
+} {
+  const conds: string[] = [];
+  const args: (string | number)[] = [];
+  if (opts?.chatId != null) {
+    conds.push("m.chat_id = ?");
+    args.push(opts.chatId);
+  }
+  if (opts?.platform) {
+    conds.push("m.platform = ?");
+    args.push(opts.platform);
+  }
+  return { extra: conds.length ? ` AND ${conds.join(" AND ")}` : "", args };
+}
+
+/**
+ * Full-text search, filtered in SQL.
+ *
+ * `chatId` / `platform` are pushed into the WHERE clause rather than applied to the result.
+ * Filtering afterwards means the LIMIT is spent on rows the caller did not ask for, and a
+ * chat-scoped search silently loses every match older than the cut — exactly the case
+ * "find that thing someone said" is made of.
+ */
 export function searchMessages(
   db: Database,
   query: string,
-  opts?: { limit?: number }
+  opts?: { limit?: number; offset?: number } & SearchFilter
 ): SearchResult[] {
   const limit = opts?.limit ?? 50;
+  const offset = opts?.offset ?? 0;
+  const { extra, args } = searchFilterSql(opts);
 
   if (query.length < 3) {
     return db
-      .query<SearchResult, [string, number]>(
-        `SELECT id, platform, platform_message_id, chat_id, sender_id,
-                timestamp, content_type, content_text, content_text AS snippet,
-                edited_at, retracted_at
-         FROM messages
-         WHERE content_text LIKE '%' || ? || '%'
-         ORDER BY timestamp DESC
-         LIMIT ?`
+      .query<SearchResult, (string | number)[]>(
+        `SELECT m.id, m.platform, m.platform_message_id, m.chat_id, m.sender_id,
+                m.timestamp, m.content_type, m.content_text, m.content_text AS snippet,
+                m.edited_at, m.retracted_at
+         FROM messages m
+         WHERE m.content_text LIKE '%' || ? || '%'${extra}
+         ORDER BY m.timestamp DESC
+         LIMIT ? OFFSET ?`
       )
-      .all(query, limit);
+      .all(query, ...args, limit, offset);
   }
 
   return db
-    .query<SearchResult, [string, number]>(
+    .query<SearchResult, (string | number)[]>(
       `SELECT m.id, m.platform, m.platform_message_id, m.chat_id, m.sender_id,
               m.timestamp, m.content_type, m.content_text,
               m.edited_at, m.retracted_at,
               snippet(messages_fts, 0, '<b>', '</b>', '...', 32) AS snippet
        FROM messages_fts fts
        JOIN messages m ON m.id = fts.rowid
-       WHERE messages_fts MATCH ?
+       WHERE messages_fts MATCH ?${extra}
        ORDER BY m.timestamp DESC
-       LIMIT ?`
+       LIMIT ? OFFSET ?`
     )
-    .all(query, limit);
+    .all(query, ...args, limit, offset);
+}
+
+/**
+ * How many messages the same query matches, ignoring pagination.
+ *
+ * Deriving the total from `searchMessages(...).length` would report the page size — or the
+ * cap — as if it were the answer, so "3 / 3 hits" is shown for a query with 1200.
+ * Shares `searchFilterSql` with the search itself; a second copy of the predicate would let
+ * the count and the results disagree about what was searched.
+ */
+export function countSearchMessages(
+  db: Database,
+  query: string,
+  opts?: SearchFilter
+): number {
+  const { extra, args } = searchFilterSql(opts);
+
+  const sql =
+    query.length < 3
+      ? `SELECT COUNT(*) AS n
+         FROM messages m
+         WHERE m.content_text LIKE '%' || ? || '%'${extra}`
+      : `SELECT COUNT(*) AS n
+         FROM messages_fts fts
+         JOIN messages m ON m.id = fts.rowid
+         WHERE messages_fts MATCH ?${extra}`;
+
+  return (
+    db.query<{ n: number }, (string | number)[]>(sql).get(query, ...args)?.n ?? 0
+  );
 }
 
 export function getMessages(

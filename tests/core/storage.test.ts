@@ -9,6 +9,7 @@ import { JsonlWriter, type JsonlEvent } from "../../src/core/storage/jsonl";
 import { syncEventToSQLite } from "../../src/core/storage/sqlite";
 import {
   searchMessages,
+  countSearchMessages,
   getMessages,
   listChats,
   getStatus,
@@ -237,10 +238,16 @@ describe("Query functions", () => {
   const makeEvent = (
     id: string,
     text: string,
-    opts?: { chatId?: string; chatName?: string; senderName?: string; timestamp?: number }
+    opts?: {
+      chatId?: string;
+      chatName?: string;
+      senderName?: string;
+      timestamp?: number;
+      platform?: string;
+    }
   ): JsonlEvent => ({
     type: "message",
-    platform: "line",
+    platform: opts?.platform ?? "line",
     platform_message_id: id,
     chat: { platform_id: opts?.chatId ?? "c_001", type: "direct", name: opts?.chatName ?? "Alice" },
     sender: { platform_id: "u_001", display_name: opts?.senderName ?? "Alice" },
@@ -285,6 +292,80 @@ describe("Query functions", () => {
 
       const results = searchMessages(db, "午餐", { limit: 3 });
       expect(results.length).toBe(3);
+    });
+
+    test("should push chat_id down into SQL, not filter after a cap", () => {
+      // 1200 noise rows in chat A, all matching the same term. The old code took the
+      // newest 1000 and then filtered, so anything in another chat that sorts older
+      // than the 1000th row became unreachable.
+      for (let i = 0; i < 1200; i++) {
+        syncEventToSQLite(
+          db,
+          makeEvent(`noise_${i}`, `午餐第${i}天`, {
+            chatId: "c_noise",
+            timestamp: 1690000000000 + i * 1000,
+          }),
+        );
+      }
+      // The needle is the OLDEST matching row overall.
+      syncEventToSQLite(
+        db,
+        makeEvent("needle", "午餐在這裡", {
+          chatId: "c_needle",
+          timestamp: 1680000000000,
+        }),
+      );
+
+      const needleChat = db
+        .query<{ id: number }, [string]>(
+          "SELECT id FROM chats WHERE platform_id = ?",
+        )
+        .get("c_needle")!;
+
+      const results = searchMessages(db, "午餐", { chatId: needleChat.id });
+
+      expect(results.length).toBe(1);
+      expect(results[0].content_text).toBe("午餐在這裡");
+    });
+
+    test("should push platform down into SQL", () => {
+      syncEventToSQLite(db, makeEvent("l_1", "午餐吃拉麵", { chatId: "c_l" }));
+      syncEventToSQLite(
+        db,
+        makeEvent("t_1", "午餐吃咖哩", { chatId: "c_t", platform: "telegram" }),
+      );
+
+      const results = searchMessages(db, "午餐", { platform: "telegram" });
+
+      expect(results.length).toBe(1);
+      expect(results[0].platform).toBe("telegram");
+    });
+
+    test("should apply offset in SQL", () => {
+      for (let i = 0; i < 5; i++) {
+        syncEventToSQLite(
+          db,
+          makeEvent(`o_${i}`, `午餐第${i}天`, { timestamp: 1690000000000 + i * 1000 }),
+        );
+      }
+      const page1 = searchMessages(db, "午餐", { limit: 2, offset: 0 });
+      const page2 = searchMessages(db, "午餐", { limit: 2, offset: 2 });
+
+      expect(page1.length).toBe(2);
+      expect(page2.length).toBe(2);
+      const ids = new Set([...page1, ...page2].map((r) => r.id));
+      expect(ids.size).toBe(4);   // no overlap between pages
+    });
+
+    test("countSearchMessages should not be capped by the page limit", () => {
+      for (let i = 0; i < 1200; i++) {
+        syncEventToSQLite(
+          db,
+          makeEvent(`c_${i}`, `午餐第${i}天`, { timestamp: 1690000000000 + i * 1000 }),
+        );
+      }
+      expect(searchMessages(db, "午餐", { limit: 20 }).length).toBe(20);
+      expect(countSearchMessages(db, "午餐")).toBe(1200);
     });
   });
 
