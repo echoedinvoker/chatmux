@@ -16,7 +16,7 @@ import { makeIngestEvent } from "./ingest.js";
 import { SafetyRail } from "./safety.js";
 import { isMethodNotFound, type SpawnResult } from "./adapter-runner.js";
 import { AdapterManager } from "./adapter-manager.js";
-import { loadAdapterConfigs, loadMcpPort } from "./config.js";
+import { loadAdapterConfigs, loadMcpPort, loadMcpHost } from "./config.js";
 import { startMcpServer } from "./mcp/server.js";
 import {
   handleListChats,
@@ -49,6 +49,7 @@ const socketPath =
 mkdirSync(dataDir, { recursive: true });
 
 const mcpPort = loadMcpPort(dataDir);
+const mcpHost = loadMcpHost(dataDir);
 
 console.error(`[daemon] data dir: ${dataDir}`);
 console.error(`[daemon] socket: ${socketPath}`);
@@ -612,7 +613,7 @@ async function main(): Promise<void> {
 
   console.error("[daemon] starting MCP server...");
   const closeMcp = await startMcpServer(
-    { socketPath, port: mcpPort },
+    { socketPath, port: mcpPort, host: mcpHost },
     { registerTools, registerResources },
   );
   console.error("[daemon] MCP server started");

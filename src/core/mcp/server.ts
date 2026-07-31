@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { DEFAULT_MCP_HOST, isLoopback } from "../config.js";
 
 interface Session {
   transport: StreamableHTTPServerTransport;
@@ -28,10 +29,16 @@ export interface McpListenOptions {
   /** Unix socket path — for same-host sidecar/plugin consumers (e.g. chat.nvim). */
   socketPath: string;
   /**
-   * TCP port bound to 127.0.0.1 — for standard MCP clients (Claude Code), which
-   * only speak stdio or streamable HTTP. Omit or set 0 to disable.
+   * TCP port — for standard MCP clients (Claude Code), which only speak stdio
+   * or streamable HTTP. Omit or set 0 to disable.
    */
   port?: number;
+  /**
+   * Bind address for the TCP listener. Defaults to loopback; a container needs
+   * `0.0.0.0` to be reachable from outside. Non-loopback values warn at startup
+   * (see `isLoopback`).
+   */
+  host?: string;
 }
 
 export async function startMcpServer(
@@ -112,7 +119,7 @@ export async function startMcpServer(
     }
   }
 
-  const { socketPath, port } = listen;
+  const { socketPath, port, host = DEFAULT_MCP_HOST } = listen;
   const listeners: Server[] = [];
 
   if (existsSync(socketPath)) unlinkSync(socketPath);
@@ -124,10 +131,21 @@ export async function startMcpServer(
 
   if (port && port > 0) {
     const tcpServer = createServer(handleMcpRequest);
-    // Loopback only — never bind the wildcard address; this exposes all chat history.
-    await listenOn(tcpServer, { port, host: "127.0.0.1" });
+    // Loopback by default — anything else exposes all chat history, so it must
+    // be asked for explicitly and it warns loudly below.
+    await listenOn(tcpServer, { port, host });
     listeners.push(tcpServer);
-    console.error(`[MCP] listening on http://127.0.0.1:${port}/mcp`);
+    console.error(`[MCP] listening on http://${host}:${port}/mcp`);
+    if (!isLoopback(host)) {
+      console.error(
+        `[MCP] WARNING: bound to ${host}, which is not loopback. This listener has ` +
+          `no authentication and none of the file-permission protection the unix ` +
+          `socket has — anyone who can reach ${host}:${port} can read the full text ` +
+          `of every conversation and send messages as you. Restrict it at the ` +
+          `network layer (firewall, a private overlay such as Tailscale, or a ` +
+          `container network you do not publish to the world).`,
+      );
+    }
   }
 
   return () => {

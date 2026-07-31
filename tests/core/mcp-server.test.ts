@@ -39,6 +39,21 @@ function registerResources(): void {
   // Resources are covered by mcp-tools.test.ts; this suite is about transport.
 }
 
+/** Collect everything written via console.error while `fn` runs. */
+async function captureConsoleError(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    await fn();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
+
 /** MCP Streamable HTTP responses may be JSON or an SSE stream — normalize both. */
 async function readJsonRpc(res: Response): Promise<Record<string, unknown>> {
   const body = await res.text();
@@ -191,6 +206,82 @@ describe("MCP server without TCP port", () => {
       await res.text();
     } finally {
       close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Containers cannot reach a loopback-bound listener, which is what makes
+// chatmux impossible to self-host in Docker. The host is settable; the default
+// above must stay loopback.
+describe("MCP server with an explicit bind host", () => {
+  // 0.0.0.0 binds on any machine. Never assert against a concrete interface IP
+  // (a Tailscale address, say) — absent on CI it fails for the wrong reason.
+  const HOST_PORT = 47718;
+  const dir = join(import.meta.dir, "../../.test-mcp-host-tmp");
+  const sock = join(dir, "host.sock");
+  let close: (() => void) | undefined;
+  let startupLog: string[] = [];
+
+  beforeAll(async () => {
+    mkdirSync(dir, { recursive: true });
+    startupLog = await captureConsoleError(async () => {
+      close = await startMcpServer(
+        { socketPath: sock, port: HOST_PORT, host: "0.0.0.0" },
+        { registerTools, registerResources },
+      );
+    });
+  });
+
+  afterAll(() => {
+    close?.();
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("binds the requested address instead of loopback", () => {
+    const proc = Bun.spawnSync(["ss", "-ltnH", `sport = :${HOST_PORT}`]);
+    const rows = proc.stdout
+      .toString()
+      .split("\n")
+      .filter((l) => l.trim() !== "");
+
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const localAddr = row.trim().split(/\s+/)[3];
+      expect(localAddr).toBe(`0.0.0.0:${HOST_PORT}`);
+    }
+  });
+
+  test("warns at startup that a non-loopback bind exposes everything", () => {
+    const warning = startupLog.find((l) => l.includes("WARNING"));
+    expect(warning).toBeDefined();
+    // A vague "non-default host" line would satisfy a mere "did it warn?"
+    // assertion while telling the operator nothing about what they just did.
+    expect(warning).toContain("0.0.0.0");
+    expect(warning!.toLowerCase()).toContain("no authentication");
+    expect(warning!.toLowerCase()).toContain("full text");
+  });
+});
+
+describe("MCP server on the default host", () => {
+  // The warning must stay silent here: one that fires on safe setups is one
+  // nobody reads when it finally matters.
+  test("does not warn when bound to the default loopback address", async () => {
+    const dir = join(import.meta.dir, "../../.test-mcp-quiet-tmp");
+    mkdirSync(dir, { recursive: true });
+    const sock = join(dir, "quiet.sock");
+    let close: (() => void) | undefined;
+
+    try {
+      const startupLog = await captureConsoleError(async () => {
+        close = await startMcpServer(
+          { socketPath: sock, port: 47719 },
+          { registerTools, registerResources },
+        );
+      });
+      expect(startupLog.some((l) => l.includes("WARNING"))).toBe(false);
+    } finally {
+      close?.();
       rmSync(dir, { recursive: true, force: true });
     }
   });
