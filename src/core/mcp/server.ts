@@ -16,7 +16,12 @@ interface Session {
 
 export interface McpServerDeps {
   registerTools: (server: McpServer) => void;
-  registerResources: (server: McpServer) => void;
+  /**
+   * Returns a per-session cleanup — subscription state is registered against a shared
+   * manager, so a session that closes without cleaning up leaves a listener behind that
+   * is still called after its server is gone.
+   */
+  registerResources: (server: McpServer) => (() => void) | void;
 }
 
 export interface McpListenOptions {
@@ -35,14 +40,14 @@ export async function startMcpServer(
 ): Promise<() => void> {
   const sessions = new Map<string, Session>();
 
-  function createMcp(): McpServer {
+  function createMcp(): { server: McpServer; cleanup: () => void } {
     const server = new McpServer({
       name: "chatmux",
       version: "0.1.0",
     });
     deps.registerTools(server);
-    deps.registerResources(server);
-    return server;
+    const cleanup = deps.registerResources(server);
+    return { server, cleanup: cleanup ?? (() => {}) };
   }
 
   // Named handler so every listener (unix socket + TCP) shares one request path
@@ -91,8 +96,9 @@ export async function startMcpServer(
     transport.onclose = () => {
       const id = transport.sessionId;
       if (id) sessions.delete(id);
+      cleanup();
     };
-    const server = createMcp();
+    const { server, cleanup } = createMcp();
     await server.connect(transport);
 
     try {

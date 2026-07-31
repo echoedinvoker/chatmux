@@ -31,7 +31,11 @@ import {
   type ProbeDeps,
 } from "./mcp/tools.js";
 import { MediaCache } from "./media-cache.js";
-import { handleResource, ResourceSubscriptionManager } from "./mcp/resources.js";
+import {
+  handleResource,
+  ResourceSubscriptionManager,
+  registerSubscriptionHandlers,
+} from "./mcp/resources.js";
 import { needsBackfill, backfillChat, type BackfillDeps } from "./backfill-on-demand.js";
 import { catchUpAdapter } from "./cold-start-catchup.js";
 import { createReconnectCatchupTrigger } from "./reconnect-catchup.js";
@@ -364,7 +368,7 @@ function triggerOnDemandBackfill(chatId: string): void {
   );
 }
 
-function registerResources(server: McpServer): void {
+function registerResources(server: McpServer): () => void {
   const resourceCtx = () => {
     const adapters: Record<string, { state: string; last_liveness_evidence_at?: number; liveness_age_seconds?: number }> = {};
     const statuses = manager.getStatuses();
@@ -410,12 +414,7 @@ function registerResources(server: McpServer): void {
     return { contents: [{ uri: uri.href, mimeType: "application/json", text: data ?? "null" }] };
   });
 
-  subscriptions.onUpdate((resourceUri) => {
-    server.server.notification({
-      method: "notifications/resources/updated",
-      params: { uri: resourceUri },
-    });
-  });
+  return registerSubscriptionHandlers(server, subscriptions);
 }
 
 /** Who "we" are on each platform, filled by the optional `get_self` request. */

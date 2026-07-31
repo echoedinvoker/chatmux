@@ -1,4 +1,9 @@
 import { Database } from "bun:sqlite";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { handleListChats, handleReadMessages, handleGetStatus } from "./tools.js";
 
 interface ResourceContext {
@@ -92,8 +97,18 @@ export function handleResource(
 export class ResourceSubscriptionManager {
   private listeners: ((uri: string) => void)[] = [];
 
-  onUpdate(fn: (uri: string) => void): void {
+  /** Exposed so tests can assert listeners do not leak when sessions close. */
+  get listenerCount(): number {
+    return this.listeners.length;
+  }
+
+  /** Returns a canceller; sessions must call it on close or their listener outlives them. */
+  onUpdate(fn: (uri: string) => void): () => void {
     this.listeners.push(fn);
+    return () => {
+      const i = this.listeners.indexOf(fn);
+      if (i !== -1) this.listeners.splice(i, 1);
+    };
   }
 
   notifyMessageReceived(chatId: string): void {
@@ -113,4 +128,43 @@ export class ResourceSubscriptionManager {
   notifyStatusChanged(): void {
     for (const fn of this.listeners) fn("chat://status");
   }
+}
+
+/**
+ * Wires MCP resource subscription onto one session's server.
+ *
+ * Lives here rather than in daemon.ts so tests exercise the shipped code: daemon.ts has
+ * module-level side effects (DB, AdapterManager) and cannot be imported by a test, so a
+ * copy of this logic there would only ever be verified by a copy of it in a fixture.
+ *
+ * URIs are matched by exact equality — subscribing to a template does *not* cover its
+ * instances. MCP does not define that semantic and inventing it would give third-party
+ * clients undocumented behaviour.
+ *
+ * Returns a canceller the caller must invoke when the session closes.
+ */
+export function registerSubscriptionHandlers(
+  server: McpServer,
+  subs: ResourceSubscriptionManager,
+): () => void {
+  const subscribed = new Set<string>(); // per-session: one call per session
+
+  // Must happen before server.connect(transport) — the SDK throws otherwise.
+  server.server.registerCapabilities({ resources: { subscribe: true } });
+
+  server.server.setRequestHandler(SubscribeRequestSchema, async ({ params }) => {
+    subscribed.add(params.uri);
+    return {};
+  });
+  server.server.setRequestHandler(UnsubscribeRequestSchema, async ({ params }) => {
+    subscribed.delete(params.uri);
+    return {};
+  });
+
+  return subs.onUpdate((uri) => {
+    if (!subscribed.has(uri)) return;
+    server.server
+      .notification({ method: "notifications/resources/updated", params: { uri } })
+      .catch((err) => console.error("[MCP] notify failed:", err));
+  });
 }
