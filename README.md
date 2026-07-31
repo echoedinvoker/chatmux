@@ -26,7 +26,43 @@ cd chatmux
 bun install
 ```
 
-### 2. First login (QR code)
+### 2. Decide whether to connect an account yet
+
+With no `adapters.json`, `bun run start` launches the **LINE adapter**, which means step 3 puts
+your LINE account on the line — read [Account Risk Warning](#️-account-risk-warning) before you
+run it. If you would rather look around first, start with no adapter at all:
+
+```bash
+mkdir -p ~/.local/share/chatmux
+cat > ~/.local/share/chatmux/adapters.json <<'JSON'
+{
+  "adapters": [],
+  "mcp": { "port": 7717 }
+}
+JSON
+bun run start
+```
+
+The daemon comes up with storage and the full MCP interface — you can `initialize`, list tools,
+and read resources. There is simply no chat data behind them until an adapter is connected. Set
+`CHATMUX_DATA_DIR` to keep this trial run out of your real data directory:
+
+```bash
+CHATMUX_DATA_DIR=/tmp/chatmux-trial bun run start
+```
+
+Each entry in `adapters` takes `platform`, a `command` **string**, and an `args` **array**
+(plus optional `cwd` and `env`):
+
+```json
+{ "platform": "telegram", "command": "python", "args": ["-m", "chatmux_adapter_telegram"] }
+```
+
+For Telegram, follow the setup in
+[chatmux-adapter-telegram](https://github.com/echoedinvoker/chatmux-adapter-telegram) — it has its
+own credentials and login flow, and does not involve LINE.
+
+### 3. First login (QR code)
 
 ```bash
 bun run start
@@ -35,7 +71,7 @@ bun run start
 # After successful login, authToken is saved for future auto-login
 ```
 
-### 3. Connect Claude Code
+### 4. Connect Claude Code
 
 Register the daemon's MCP endpoint with Claude Code:
 
@@ -121,10 +157,6 @@ See `docs/` for detailed architecture and protocol documentation.
 
 Known and accepted, with what would make each worth revisiting.
 
-- **`get_contacts` fails once on every cold start.** One `AdapterProtocolError` line in the log.
-  Sender names still resolve — the adapter falls back to its entity cache — so the failure is
-  noise rather than damage. Worth a look if it starts appearing outside cold start, or if sender
-  resolution actually begins to fail.
 - **The chat list caps at 1000, silently.** `chat://chats` is hard-coded to that limit. Consumers
   can detect an overflow by comparing the `total` field against what arrived, so it will not bite
   you without saying so. Worth raising once a vault approaches ~500 chats, or the first time that
@@ -136,6 +168,16 @@ Known and accepted, with what would make each worth revisiting.
   and the SQLite projection is unaffected — so the fix, if ever needed, is a one-off compaction
   rather than a code change. Worth doing if the log passes ~500 MB, if the duplicate count starts
   climbing again, or if cold start slows noticeably.
+- **Retractions in Telegram one-to-one chats are missed.** Group retractions land; direct ones do
+  not, because the adapter cannot recover the chat id for those events from its entity cache, and
+  core will not match a message on id alone — that ambiguity is exactly what the storage key was
+  widened to remove. So a message you retracted on your phone can stay visible here. Worth fixing
+  once the adapter can resolve the chat id itself, or as soon as retraction accuracy matters to a
+  consumer.
+- **Reactions are not stored at all.** The platforms send them; no layer reads them. Nothing in
+  core, the schema, or the MCP surface represents a reaction, so a consumer cannot show what a
+  phone shows. Worth building when reactions carry meaning you would otherwise miss — it is new
+  storage, not a display tweak.
 - **`read_receipt` is declared but never emitted.** The LINE adapter advertises the capability and
   core is ready to ingest it; nothing constructs the event. Whether read state should reach a UI
   at all is an open product question, not a pending bug — but the declaration is wrong today, so
