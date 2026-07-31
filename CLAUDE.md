@@ -67,7 +67,9 @@ JSONL) agreeing with the live database.
 ### ID Scheme
 
 External: `platform:platform_id` (e.g. `line:u1234`). Internal: auto-increment PK for FK joins.
-Dedup: UNIQUE(platform, platform_id) on contacts/chats; UNIQUE(platform, platform_message_id) on messages.
+Dedup: UNIQUE(platform, platform_id) on contacts/chats; UNIQUE(platform, chat_id, platform_message_id)
+on messages — a platform message id is only unique **within a chat** (F16; see
+`docs/platform-facts.md` fact 1).
 
 ### SafetyRail: Dual-Layer
 
@@ -125,3 +127,6 @@ tests — what deserves interrupting you has no single right answer — so it li
 - `docs/safety-rail.md` — Dual-layer SafetyRail architecture
 - `docs/line-adapter.md` — LINE-specific: linejs, LEGY Push, E2EE
 - `docs/testing.md` — TDD conventions, line-tui test suite migration
+- `docs/platform-facts.md` — **What each platform actually does, as measured.** Read this before
+  adding any dependency point keyed on a platform field (SQL condition, path, map key, cache
+  key) — a message id, for one, does not identify a message on its own
