@@ -70,7 +70,18 @@ HTTP/1.1 + SSE, with **two listeners sharing one handler and one session map**:
 | Direction | Type | Semantics |
 |-----------|------|-----------|
 | Consumer → Core | Tool call | `list_chats`, `read_messages`, `read_events`, `search_messages`, `send_message`, `get_media`, `probe_latest`, `get_status` |
-| Core → Consumer | Resource notification | `notifications/resources/updated`, pushed when a new message arrives |
+| Core → Consumer | Resource notification | `notifications/resources/updated`, pushed to the sessions subscribed to the affected URI |
+
+**Subscription state is per session, and it dies with the session.** Each session gets
+its own subscribed-URI set plus one listener on the storage update stream; closing the
+transport removes both. URIs match by exact equality — no template expansion — so a
+consumer subscribes to each URI it wants. A session that never subscribes receives
+nothing.
+
+That last sentence used to be false: the server broadcast every update to every session
+and answered `resources/subscribe` with `-32601`. Our own sidecar survived on the
+resulting coincidence, which is why the fix had to be verified by a client that shares
+none of our assumptions rather than by the sidecar continuing to work.
 
 Full specification: `mcp-interface.md`.
 

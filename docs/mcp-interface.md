@@ -696,6 +696,38 @@ MCP resource subscription follows a **notify-then-fetch** model:
 A client that appends whatever it fetches, skipping IDs it already holds, will drop
 every edit and retraction on the floor. Upsert by `message.id` instead.
 
+### Semantics
+
+**You get notifications only for URIs you subscribed to.** The server declares
+`resources.subscribe: true` in its `initialize` response and keeps a subscription set
+**per session**. A session that never calls `resources/subscribe` receives nothing —
+not a filtered stream, nothing at all.
+
+This is worth stating because it was not always true. Before 2026-08-01 the server
+declared no subscribe capability, answered `resources/subscribe` with `-32601`, and
+broadcast every update to every connected session regardless. A client written to this
+document — subscribe, then handle what you subscribed to — got nothing; a client that
+ignored subscription entirely got everything. Both of those behaviours are now gone.
+
+**URIs match by exact equality.** Subscribing to `chat://chats` does **not** cover
+`chat://chats/{id}/messages`. MCP does not define "a subscription to a template covers
+its instances", so chatmux does not invent it — subscribe to each URI you actually want.
+The three a consumer normally wants are:
+
+```
+chat://chats
+chat://status
+chat://chats/{id}/messages      ← one per open chat
+```
+
+**Subscriptions die with the session.** Terminate a session (HTTP `DELETE /mcp` with
+your `mcp-session-id`) and its subscription set and update listener go with it. Note
+the corollary: a client that vanishes *without* sending `DELETE` — crash, pulled cable
+— leaves its session behind until the daemon restarts. Reaping idle sessions is not
+implemented.
+
+`resources/unsubscribe` removes a single URI from the current session's set.
+
 ### Trigger flow
 
 ```
