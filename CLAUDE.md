@@ -21,8 +21,8 @@ AI clients (Claude Code). Not a chat app — no UI, pure data layer.
 - `src/core/storage/query.ts` — High-level queries: search, paginated read, event cursor, stats
 - `src/core/storage/replay.ts` — `replayJsonl`: rebuild SQLite by replaying JSONL through the projection
 - `src/core/ingest.ts` — Ingest boundary: shape validation + per-event isolation (no storage semantics)
-- `src/core/mcp/server.ts` — MCP Streamable HTTP on loopback TCP + unix socket (shared handler)
-- `src/core/mcp/tools.ts` — 6 MCP tools (list_chats, read_messages, read_events, search_messages, send_message, get_status)
+- `src/core/mcp/server.ts` — MCP Streamable HTTP on TCP (loopback by default, host settable) + unix socket (shared handler)
+- `src/core/mcp/tools.ts` — 8 MCP tools (list_chats, read_messages, read_events, search_messages, send_message, get_media, probe_latest, get_status)
 - `src/core/mcp/resources.ts` — 4 MCP resources + subscription
 - `src/adapters/line/` — LINE adapter (Node+tsx, NOT Bun — LEGY Push needs HTTP/2)
 - `examples/notifier/` — Reference consumer: cursor-based event tailing. NOT core (see NEVER #11)
@@ -42,7 +42,7 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 
 - Core = main process (Bun). Adapter = child process (Node+tsx). MCP server = same process as core.
 - Two communication boundaries: adapter↔core (stdio JSON-RPC), core↔consumer (MCP Streamable HTTP).
-- Core↔consumer runs **two listeners sharing one handler + session map**: loopback TCP for standard MCP
+- Core↔consumer runs **two listeners sharing one handler + session map**: TCP (loopback by default, `CHATMUX_MCP_HOST` to change it) for standard MCP
   clients (Claude Code — the MCP spec has no unix socket transport), unix socket for same-host sidecars
   (chat.nvim). Adding one must never break the other; `tests/core/mcp-server.test.ts` guards both.
 
@@ -113,7 +113,8 @@ tests — what deserves interrupting you has no single right answer — so it li
 |----------|---------|---------|
 | `CHATMUX_DATA_DIR` | `~/.local/share/chatmux` | Data directory (JSONL, SQLite, media, auth) |
 | `CHATMUX_SOCKET` | `$CHATMUX_DATA_DIR/chatmux.sock` | MCP unix socket path |
-| `CHATMUX_MCP_PORT` | `7717` | MCP TCP port, bound to 127.0.0.1 only. `0` disables. Overrides `mcp.port` in `adapters.json` |
+| `CHATMUX_MCP_PORT` | `7717` | MCP TCP port. `0` disables it, leaving the unix socket. Overrides `mcp.port` in `adapters.json` |
+| `CHATMUX_MCP_HOST` | `127.0.0.1` | MCP TCP bind address. Overrides `mcp.host` in `adapters.json`. Any non-loopback value warns at startup — this listener has no authentication. Settable for containers (see `deploy/container/`) |
 | `CHATMUX_LOG_LEVEL` | `info` | Log level |
 | `CHATMUX_LIVE_TEST` | (unset) | Set to `1` to enable live integration tests (see `docs/testing.md`) |
 | `CHATMUX_TEST_CHAT_ID` | (unset) | Send target MID for live tests, e.g. `line:u1234...` |
@@ -123,7 +124,7 @@ tests — what deserves interrupting you has no single right answer — so it li
 - `docs/architecture.md` — Three-layer topology, process model, data flow
 - `docs/adapter-protocol.md` — stdio JSON-RPC contract, adapter lifecycle
 - `docs/storage-schema.md` — JSONL + SQLite schema, FTS5 trigram + LIKE fallback, event cursor
-- `docs/mcp-interface.md` — 6 tools + 4 resources + subscription
+- `docs/mcp-interface.md` — 8 tools + 4 resources + subscription, bind host/port config
 - `docs/safety-rail.md` — Dual-layer SafetyRail architecture
 - `docs/line-adapter.md` — LINE-specific: linejs, LEGY Push, E2EE
 - `docs/testing.md` — TDD conventions, line-tui test suite migration

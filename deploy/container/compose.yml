@@ -1,0 +1,19 @@
+services:
+  chatmux:
+    build:
+      # The build context is the repo root; this file lives two levels down.
+      context: ../..
+      dockerfile: deploy/container/Dockerfile
+    ports:
+      # Bound to the host's loopback on purpose. The container binds 0.0.0.0 because
+      # it has to — that is the container's own interface, not your machine's. Where
+      # the port becomes reachable is decided *here*, and "127.0.0.1:" is the only
+      # default that does not put every conversation on your LAN.
+      #
+      # Change it to "0.0.0.0:7717:7717" only behind a firewall or a private overlay.
+      - "127.0.0.1:7717:7717"
+    volumes:
+      - chatmux-data:/data
+
+volumes:
+  chatmux-data:

@@ -1,0 +1,7 @@
+# Keep the build context small. Without this, `docker build` ships ~90MB of
+# node_modules to the daemon before the first layer runs — the image installs its own
+# dependencies inside the container anyway (see deploy/container/Dockerfile).
+node_modules/
+dist/
+data/
+.git/

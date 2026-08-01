@@ -58,14 +58,18 @@ Full specification: `adapter-protocol.md`.
 
 HTTP/1.1 + SSE, with **two listeners sharing one handler and one session map**:
 
-- **TCP** `127.0.0.1:<port>` (`CHATMUX_MCP_PORT` or `mcp.port` in `adapters.json`, default `7717`; `0` disables)
-  — for standard MCP clients such as Claude Code. The MCP spec defines only stdio and streamable HTTP; **there is no unix socket transport**.
+- **TCP** `<host>:<port>` — for standard MCP clients such as Claude Code. The MCP spec
+  defines only stdio and streamable HTTP; **there is no unix socket transport**.
+  - port: `CHATMUX_MCP_PORT` or `mcp.port` in `adapters.json`, default `7717`; `0` disables
+  - host: `CHATMUX_MCP_HOST` or `mcp.host`, default `127.0.0.1`. Settable so the daemon
+    can run in a container, where loopback is unreachable from outside; any non-loopback
+    bind warns at startup, because this listener has no authentication.
 - **Unix socket** `$CHATMUX_SOCKET` (default `~/.local/share/chatmux/chatmux.sock`)
   — for same-host sidecar and plugin consumers such as chat.nvim.
 
 | Direction | Type | Semantics |
 |-----------|------|-----------|
-| Consumer → Core | Tool call | `list_chats`, `read_messages`, `read_events`, `search_messages`, `send_message`, `get_status` |
+| Consumer → Core | Tool call | `list_chats`, `read_messages`, `read_events`, `search_messages`, `send_message`, `get_media`, `probe_latest`, `get_status` |
 | Core → Consumer | Resource notification | `notifications/resources/updated`, pushed when a new message arrives |
 
 Full specification: `mcp-interface.md`.

@@ -54,7 +54,7 @@ const mcpHost = loadMcpHost(dataDir);
 console.error(`[daemon] data dir: ${dataDir}`);
 console.error(`[daemon] socket: ${socketPath}`);
 console.error(
-  `[daemon] mcp tcp: ${mcpPort > 0 ? `127.0.0.1:${mcpPort}` : "disabled (unix socket only)"}`,
+  `[daemon] mcp tcp: ${mcpPort > 0 ? `${mcpHost}:${mcpPort}` : "disabled (unix socket only)"}`,
 );
 
 const jsonlPath = join(dataDir, "events.jsonl");

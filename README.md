@@ -102,7 +102,7 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 - **Core daemon** (Bun): central process managing storage, safety, and MCP server
 - **LINE adapter** (Node+tsx): child process connecting to LINE via IOSIPAD slot
 - **Storage**: JSONL append-only truth source + SQLite/FTS5 queryable view
-- **MCP server**: Streamable HTTP over loopback TCP (standard MCP clients) + unix socket (same-host sidecars), 6 tools + 4 resources
+- **MCP server**: Streamable HTTP over TCP (standard MCP clients; loopback by default, settable for containers) + unix socket (same-host sidecars), 8 tools + 4 resources
 
 ## MCP Tools
 
@@ -113,6 +113,8 @@ LINE adapter ←── stdio JSON-RPC ──→ core daemon ←── MCP Stream
 | `read_events` | Tail the event log from an opaque cursor — resumable, survives backfill reordering, and re-delivers a message when it is edited or retracted |
 | `search_messages` | Full-text search (CJK supported via FTS5 trigram + LIKE fallback) |
 | `send_message` | Send message through SafetyRail (rate-limited, error-tracked) |
+| `get_media` | Local file path for a message's image or sticker; downloads and caches on first call |
+| `probe_latest` | Diagnostic, read-only: ask the adapter for a chat's newest N messages without landing them |
 | `get_status` | System status: adapter connection + storage stats |
 
 ## MCP Resources
@@ -142,6 +144,19 @@ cp config/chatmux.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now chatmux
 ```
+
+## Containers
+
+A systemd user service is the intended way to run chatmux. If you want it in a
+container instead, [`deploy/container/`](deploy/container/) is a reference that builds
+and answers — not an official image, and it runs **zero adapters**, because adapters
+hold logged-in sessions and a container you rebuild is the wrong home for those.
+
+The one thing you cannot skip is `CHATMUX_MCP_HOST`. The daemon binds `127.0.0.1` by
+default, which inside a container is the container's own loopback — a published port
+then maps to a socket nobody is listening on, and every connection is refused while the
+logs look perfectly healthy. Read `deploy/container/README.md` before assuming your
+port mapping is broken.
 
 ## Development
 

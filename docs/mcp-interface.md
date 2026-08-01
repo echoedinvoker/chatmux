@@ -1,6 +1,6 @@
 # MCP Interface
 
-chatmux exposes 6 tools, 4 resources, and resource subscription over MCP Streamable
+chatmux exposes 8 tools, 4 resources, and resource subscription over MCP Streamable
 HTTP, on **two listeners at once**.
 
 ## Transport
@@ -48,11 +48,50 @@ Setting `0` **disables the TCP listener**, leaving only the unix socket.
 An invalid value (non-integer, or outside `0-65535`) fails daemon startup outright. It
 never silently falls back to the default.
 
-**Security**: the TCP listener binds `127.0.0.1` only, never a wildcard — the full text
-of your conversations travels over it. Note that loopback lacks the file-permission
-protection a unix socket has: **any process on the same host can connect**. On a
-multi-user machine, or when you do not trust other local programs, set `mcp.port: 0` and
-use the unix socket instead.
+### Bind host
+
+| Source | Form | Notes |
+|--------|------|-------|
+| `CHATMUX_MCP_HOST` | Environment variable | Highest precedence |
+| `mcp.host` in `adapters.json` | `{ "mcp": { "host": "127.0.0.1" }, "adapters": [...] }` | Next |
+| Default | `127.0.0.1` | When neither is set |
+
+Any address the machine can bind is accepted — a wildcard, a single interface, an
+address on a private overlay such as Tailscale. As with the port, an invalid value
+fails daemon startup outright rather than falling back to the default: a bind host that
+quietly ignores you produces a listener that looks configured and answers nothing,
+which is a far worse afternoon than a startup error.
+
+Binding anything that is not loopback prints a warning at startup. `localhost`,
+anything in `127.0.0.0/8`, `::1`, and IPv4-mapped forms like `::ffff:127.0.0.1` all
+count as loopback and stay quiet. (`localhost` could in principle be pointed elsewhere
+in `/etc/hosts`; treating it as loopback is the overwhelmingly correct default, and the
+warning is a reminder rather than a security control.)
+
+### Security: two layers
+
+**Layer one — the loopback listener you get by default.** The full text of your
+conversations travels over it, and loopback lacks the file-permission protection a unix
+socket has: **any process on the same host can connect**. On a multi-user machine, or
+when you do not trust other local programs, set `mcp.port: 0` and use the unix socket
+instead.
+
+**Layer two — binding beyond loopback.** This listener has **no authentication of any
+kind**. There is no token, no TLS, no allowlist. Anyone who can route a packet to the
+address you bind can read every message chatmux has stored and send messages as you.
+Nothing in chatmux will stop them, which is why the daemon says so loudly at startup
+instead of trusting you to remember.
+
+There is one situation that genuinely needs it: **running the daemon in a container**.
+A container's `127.0.0.1` is its own loopback, so a published port maps to a socket
+nobody is listening on — the container looks healthy and every connection is refused.
+Binding the wildcard there is not a weakening; the container's network is the boundary,
+and what matters is which host address you publish the mapped port to. See
+[`deploy/container/`](../deploy/container/README.md) for a working reference.
+
+Outside that case, treat a non-loopback bind as a decision to put a network in front of
+it: a firewall, a private overlay (Tailscale, WireGuard), or a container network you do
+not publish. "It is only on my LAN" is not one of these.
 
 ## Tools
 
@@ -504,6 +543,30 @@ share one file and one "cannot fetch" memory. The cache is capped
 (200 MB) and evicts by last-read time — an evicted file costs one re-fetch, never a message.
 Failures are remembered too, which is what stops a scroll past deleted media from
 re-hitting the network on every redraw.
+
+### `probe_latest`
+
+**Diagnostic, read-only.** Asks the adapter directly for a chat's newest messages and
+returns them **without landing them** — nothing is written to the event log, SQLite, or
+FTS. Added for F23, to answer "does the adapter still see messages the store does not?"
+without mutating the thing being diagnosed.
+
+It is not a read path for consumers. Use `read_messages` for that; this one bypasses
+storage entirely, so its results are whatever the platform says right now.
+
+**Input schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "chat_id": { "type": "string", "description": "Chat ID (e.g. 'line:c1234')" },
+    "count": { "type": "number", "default": 20 }
+  },
+  "required": ["chat_id"]
+}
+```
+
+**Output:** `{ "events": [...] }` — raw adapter events, in the adapter's own shape.
 
 ### `get_status`
 

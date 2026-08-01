@@ -1,7 +1,9 @@
 {
   "mcp": {
-    "_comment": "TCP port for standard MCP clients (Claude Code). Bound to 127.0.0.1 only. 0 disables it, leaving the unix socket. Overridden by CHATMUX_MCP_PORT.",
-    "port": 7717
+    "_comment": "TCP listener for standard MCP clients (Claude Code). port 0 disables it, leaving the unix socket. Overridden by CHATMUX_MCP_PORT / CHATMUX_MCP_HOST.",
+    "_comment_host": "Defaults to 127.0.0.1. Change it only when something outside this machine's loopback must reach the daemon (a container, mainly) — this listener has no authentication, and any non-loopback value warns at startup. See docs/mcp-interface.md.",
+    "port": 7717,
+    "host": "127.0.0.1"
   },
   "adapters": [
     {
