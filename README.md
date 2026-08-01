@@ -147,6 +147,32 @@ systemctl --user daemon-reload
 systemctl --user enable --now chatmux
 ```
 
+Edit `WorkingDirectory` to point at your clone before copying it.
+
+### How it comes back
+
+The unit ships `Restart=always`, not `on-failure`. A chat backend is supposed to be there
+all day, and there are three ways it can stop being there — it crashes, something sends it
+a signal, or it exits cleanly — of which `on-failure` only recovers from the first.
+`systemctl --user stop` still stops it: a stop you asked for is not a failure, under either
+setting.
+
+> ⚠️ **If you are on an older unit with `Restart=on-failure`, `kill -TERM` will not bring
+> it back — and that is not a missing restart policy.** systemd counts SIGTERM, SIGHUP,
+> SIGINT and SIGPIPE as an intended stop, so `on-failure` leaves the service sitting in
+> `inactive` after any of them. Only `kill -9` (SIGKILL) counts as a failure there.
+>
+> With the `Restart=always` this unit now ships, **TERM comes back too** — measured
+> 2026-08-02: `kill -TERM $MainPID` moved `NRestarts` 1 → 2 and produced a new `MainPID`
+> within the 10s `RestartSec`. That makes TERM the useful test: `kill -9` restarts under
+> *either* setting, so it cannot tell you which one is in effect. If you want to confirm
+> `always` is live, send TERM and watch `systemctl --user show chatmux -p MainPID,NRestarts`
+> change.
+
+`StartLimitIntervalSec=300` / `StartLimitBurst=5` cap a crash loop: five starts inside five
+minutes and systemd stops trying, leaving the unit `failed` for you to look at rather than
+restarting into the same wall forever. Clear it with `systemctl --user reset-failed chatmux`.
+
 ## Containers
 
 A systemd user service is the intended way to run chatmux. If you want it in a

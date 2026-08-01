@@ -5,12 +5,21 @@
 [Unit]
 Description=chatmux daemon
 After=network.target
+# Pinned rather than left to the defaults, which are 5 starts in 10s — with RestartSec=10
+# below, two restarts can never fall inside a 10s window, so the guard could never fire.
+# 5 in 5 minutes is a crash loop worth stopping.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart=%h/.bun/bin/bun run src/core/daemon.ts
 WorkingDirectory=/path/to/chatmux
-Restart=on-failure
+# always, not on-failure: systemd counts SIGTERM/SIGHUP/SIGINT/SIGPIPE and a clean exit(0)
+# as an intended stop, so on-failure would leave the daemon down after any of them. For a
+# chat backend that is supposed to be there all day, all three ways of dying should be
+# recovered from. `systemctl --user stop` still stops it under either setting.
+Restart=always
 RestartSec=10
 
 [Install]
