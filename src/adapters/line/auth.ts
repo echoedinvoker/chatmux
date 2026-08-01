@@ -40,9 +40,8 @@ export async function login(dataDir: string): Promise<Client> {
       return client;
     } catch (err) {
       console.error(
-        `[AUTH] authToken login failed: ${err instanceof Error ? err.message : err}`,
+        `[AUTH] the saved login has stopped working, so we will scan a QR code again. Reason given: ${err instanceof Error ? err.message : err}`,
       );
-      console.error("[AUTH] falling back to QR login...");
     }
   }
 
@@ -55,7 +54,7 @@ export async function login(dataDir: string): Promise<Client> {
         {
           onReceiveQRUrl: (url) => {
             console.error(
-              "[QR] open LINE on your iPhone → tap QR scanner → scan this:",
+              "[QR] open LINE on your phone → open the QR scanner (iOS: Home → the scan icon; Android: Home → Add friends → QR code) → scan this:",
             );
             console.error("");
             qrcode.generate(url, { small: true });
@@ -77,13 +76,21 @@ export async function login(dataDir: string): Promise<Client> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("410") && attempt < MAX_QR_RETRIES) {
-        console.error("[QR] expired (410), retrying...");
+        console.error("[QR] that QR code expired before it was scanned. A new one follows.");
         continue;
       }
+      console.error(
+        "[AUTH] QR login failed, and not because the code expired. If this repeats: check that " +
+          "the LINE account is not blocked (README → Account Risk Warning), or start the daemon " +
+          "with no adapters configured (README → Quickstart step 2) to confirm the rest works.",
+      );
       throw err;
     }
   }
-  throw new Error("QR login failed after max retries");
+  throw new Error(
+    `QR login failed after ${MAX_QR_RETRIES} attempts. Running the command again gives you a ` +
+      "fresh QR code; if it keeps failing, see README → Account Risk Warning.",
+  );
 }
 
 function setupTokenRefresh(client: Client, dataDir: string): void {

@@ -67,7 +67,9 @@ own credentials and login flow, and does not involve LINE.
 ```bash
 bun run start
 # A QR code will appear in the terminal
-# Open LINE on your iPhone → tap QR scanner → scan
+# Open LINE on your phone → open the QR scanner → scan
+#   iOS:     Home → the scan icon
+#   Android: Home → Add friends → QR code
 # After successful login, authToken is saved for future auto-login
 ```
 
