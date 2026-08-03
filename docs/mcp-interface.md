@@ -447,12 +447,22 @@ the deduplication actually protects.
 message really did reach the platform — but core will not invent an ID for an append-only
 log whose deduplication depends on it. Expect a WARN in the daemon log.
 
-**Example output** (blocked by SafetyRail):
+**Rate limiting does not produce an error.** `SafetyRail`'s rate limiter is awaited, not
+consulted — a send over the 5/min budget is held until a slot frees and then goes through,
+so the caller sees a slower `success: true`, never a `rate_limited` rejection. There is no
+such error string anywhere in the daemon. A consumer written against a rejection would
+have a retry path that never runs, and would read the delay as a hang.
+
+The kill switch is the part of SafetyRail that does block, and it surfaces as
+`adapter_unavailable` below — deliberately the same shape as a disconnected adapter,
+because to a caller they mean the same thing: sending is not possible right now.
+
+**Example output** (send reached the adapter and failed there):
 ```json
 {
   "success": false,
-  "error": "rate_limited",
-  "detail": "Send rate limit exceeded (5/min). Next allowed in 12s."
+  "error": "send_failed",
+  "detail": "<the adapter's own error message>"
 }
 ```
 

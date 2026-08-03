@@ -171,7 +171,6 @@ its entity cache).
     {
       "platform_id": "u1234567890abcdef",
       "display_name": "Alice",
-      "avatar_url": "https://...",
       "raw": { ... }
     }
   ]
@@ -179,6 +178,13 @@ its entity cache).
 ```
 
 `raw` is optional and preserves the platform's original payload for debugging.
+
+There is no `avatar_url`. It was documented here for a while but no adapter ever populated
+it — the LINE adapter's `CachedContact` carries only `mid` and `displayName`, and
+`handleGetContacts` returns exactly the three fields above. A consumer that read this
+document would have written a null check that never fired against a field that never
+arrived. If avatars are wanted later, that is a new capability with an adapter-side
+implementation, not a documentation fix.
 
 ### `get_chats`
 
@@ -677,12 +683,16 @@ A change in adapter connection state.
 ```json
 {
   "state": "connected",
-  "detail": "LEGY Push connected",
   "last_liveness_evidence_at": 1753765200000
 }
 ```
 
 `state` is one of `"connected"`, `"reconnecting"`, `"killed"`.
+
+These two are the whole payload. A `detail` string was documented here for a while, but
+`AdapterStatus` in `src/core/adapter-manager.ts` has no such field and no adapter ever sent
+one — a human-readable reason would be dropped on the floor. Anything a consumer needs to
+act on belongs in `state` or in a timestamp it can compare against, not in prose.
 
 `last_liveness_evidence_at` (optional, epoch ms) is the last moment the adapter
 had evidence its stream was alive — it advances only when the stream produces
@@ -721,15 +731,19 @@ An internal adapter error.
 **Params:**
 ```json
 {
-  "severity": "warning",
-  "message": "LEGY Push connection lost, reconnecting...",
-  "code": "PUSH_DISCONNECTED"
+  "message": "LEGY Push connection lost, reconnecting..."
 }
 ```
 
-`severity` is one of `"info"`, `"warning"`, `"error"`, `"fatal"`.
+`message` is the entire payload. `severity` and `code` fields were documented here for a
+while — neither was ever sent, and core's `onError` handler takes `params: unknown` and
+reads neither. A consumer that branched on `code === "PUSH_DISCONNECTED"` would have
+written a branch that never runs.
 
-`"fatal"` means the adapter is about to exit.
+This notification is for the operator's stderr, not for control flow. An adapter that is
+about to exit should say so by exiting: core observes the process death and its own
+supervisor decides what to do, which is a fact it can verify rather than a severity string
+it has to trust.
 
 ## Adapter lifecycle
 

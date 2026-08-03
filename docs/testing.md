@@ -271,12 +271,12 @@ systemctl --user start chatmux
      ```typescript
      import { spawn } from "node:child_process";
      import { resolve } from "node:path";
-     import type { SpawnResult } from "../src/core/adapter-runner.js";
+     import type { SpawnResult } from "../../src/core/adapter-runner.js";
 
      const spawnAdapter = (cmd: string[]): SpawnResult => {
        const proc = spawn(cmd[0], cmd.slice(1), {
          stdio: ["pipe", "pipe", "inherit"],
-         cwd: resolve(import.meta.dir, ".."),   // project root
+         cwd: resolve(import.meta.dir, "../.."),   // project root
          env: { ...process.env },                // inherit env, including adapters.json env merge
        });
        const exitListeners: ((code: number) => void)[] = [];
@@ -293,6 +293,10 @@ systemctl --user start chatmux
        };
      };
      ```
+     Both paths are two levels up (`../../`) because step 1 puts the file in
+     `tests/integration/`, not `tests/`. A one-level path resolves to `tests/src/…`,
+     which does not exist — the import fails at load time, before any assertion runs.
+     `tests/integration/line-send.test.ts` is the working reference.
    - `runner.start()` only awaits the `initialize` RPC, not platform login. Readiness means the `status: "connected"` notification has arrived.
    - Allow a 120 second connected timeout, since platform login can be slow.
 4. **Pick a safe send target** via `CHATMUX_TEST_CHAT_ID`. Prefer your own account (send-to-self) or a dedicated test group, so no real person is bothered. Each platform exposes its self-ID differently; find it during a spike and put it in the env var.

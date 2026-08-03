@@ -111,10 +111,15 @@ const decrypted = await client.decryptMessage(rawMessage);
 linejs refreshes the token itself; listen for the `update:authtoken` event:
 
 ```typescript
-client.base.on("update:authtoken", async (token) => {
-  await saveAuthToken(token);
+client.base.on("update:authtoken", async (token: string) => {
+  await saveAuthToken(dataDir, token);
 });
 ```
+
+`saveAuthToken` takes `dataDir` first because the token path is per-instance
+(`$CHATMUX_DATA_DIR/adapters/line/auth.json`), not a module-level constant — two chatmux
+instances with different data dirs must not overwrite each other's token. See
+`setupTokenRefresh` in `src/adapters/line/auth.ts`, which is where this listener actually lives.
 
 ### Path migration
 
