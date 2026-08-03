@@ -187,6 +187,50 @@ describe("SafetyRail", () => {
     expect(killed).toBe(true);
   });
 
+  // The switch latches and blocks every send until the daemon restarts, and it used to do
+  // that without writing a line anywhere. The only way to find out was elimination against
+  // the source — so the trip has to leave a trace at the moment it happens.
+  it("logs the trip, its cause, and that sending stays blocked", async () => {
+    const sr = new SafetyRail(FAST);
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.join(" ")); };
+    try {
+      await sr.recordError(new Error("upstream reject 1"));
+      await sr.recordError(new Error("upstream reject 2"));
+      await sr.recordError(new Error("upstream reject 3"));
+    } finally {
+      console.error = original;
+    }
+
+    const trip = lines.find((l) => /kill switch/i.test(l));
+    expect(trip).toBeDefined();
+    expect(trip!).toMatch(/upstream reject 3/);
+    expect(trip!).toMatch(/restart/i);
+  });
+
+  it("remembers why the kill switch tripped", async () => {
+    const sr = new SafetyRail(FAST);
+    const original = console.error;
+    console.error = () => {};
+    try {
+      await sr.recordError(new Error("upstream reject 1"));
+      await sr.recordError(new Error("upstream reject 2"));
+      await sr.recordError(new Error("upstream reject 3"));
+    } finally {
+      console.error = original;
+    }
+    expect(sr.killSwitch.isKilled).toBe(true);
+    expect(sr.killSwitch.killDetail).toBe("upstream reject 3");
+  });
+
+  it("has no kill detail before the switch trips", () => {
+    const ks = new KillSwitch(2);
+    expect(ks.killDetail).toBeUndefined();
+    ks.recordAnomaly("first anomaly, below threshold");
+    expect(ks.killDetail).toBeUndefined();
+  });
+
   it("recordSuccess resets ErrorTracker and KillSwitch", async () => {
     const sr = new SafetyRail(FAST);
     await sr.recordError(new Error("err1"));

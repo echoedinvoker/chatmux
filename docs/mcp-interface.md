@@ -454,8 +454,16 @@ such error string anywhere in the daemon. A consumer written against a rejection
 have a retry path that never runs, and would read the delay as a hang.
 
 The kill switch is the part of SafetyRail that does block, and it surfaces as
-`adapter_unavailable` below — deliberately the same shape as a disconnected adapter,
-because to a caller they mean the same thing: sending is not possible right now.
+`send_blocked`, separate from `adapter_unavailable`. The two were once merged on the
+argument that a caller only needs to know sending is impossible right now. That argument
+does not survive contact with the person reading the message: the two are cleared by
+opposite actions — one by reconnecting an adapter, the other only by restarting the daemon
+— and the merged message named the wrong one. A tripped switch is also global, so it
+refuses sends on platforms whose adapters never faltered, and the merged message sent the
+reader to inspect a connection that was healthy the whole time.
+
+`send_blocked` therefore quotes the error that tripped the switch and names the one action
+that clears it. `get_status` reports the same state as `send_blocked` / `send_blocked_reason`.
 
 **Example output** (send reached the adapter and failed there):
 ```json
@@ -472,6 +480,15 @@ because to a caller they mean the same thing: sending is not possible right now.
   "success": false,
   "error": "adapter_unavailable",
   "detail": "LINE adapter is not connected"
+}
+```
+
+**Example output** (sending blocked by the safety kill switch):
+```json
+{
+  "success": false,
+  "error": "send_blocked",
+  "detail": "sending is blocked for every adapter by the safety kill switch, which tripped on repeated send failures (last error: <the error that tripped it>). It stays tripped until the chatmux daemon is restarted."
 }
 ```
 
@@ -580,7 +597,8 @@ storage entirely, so its results are whatever the platform says right now.
 
 ### `get_status`
 
-Returns system status: adapter connection state plus storage statistics.
+Returns system status: adapter connection state, whether sending is blocked, plus storage
+statistics.
 
 **Input schema:**
 ```json
@@ -600,6 +618,7 @@ Returns system status: adapter connection state plus storage statistics.
       "rate_limit": { "remaining": 3, "resets_in_seconds": 45 }
     }
   },
+  "send_blocked": false,
   "storage": {
     "message_count": 12345,
     "chat_count": 42,
@@ -615,6 +634,11 @@ Returns system status: adapter connection state plus storage statistics.
 
 `storage.cursor` is the current head cursor — a consumer can feed it straight into
 `read_events({ since })` to start tailing.
+
+`send_blocked` is the SafetyRail kill switch, and it is deliberately not inside `adapters`:
+one rail serves all of them, so every adapter can read `connected` while none can send.
+When it is `true`, `send_blocked_reason` carries the error that tripped it. See
+[`safety-rail.md`](./safety-rail.md).
 
 ## Resources
 

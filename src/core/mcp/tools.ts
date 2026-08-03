@@ -403,12 +403,27 @@ export async function handleSendMessage(
   deps: SendDeps,
   params: { chat_id: string; text: string },
 ): Promise<SendResult> {
-  if (!deps.isAdapterConnected() || deps.safetyRail.killSwitch.isKilled) {
+  // Two different reasons to refuse, and they need two different answers: one is fixed by
+  // reconnecting the adapter, the other only by restarting the daemon. Sharing one message
+  // between them sent a diagnosis at the connection for hours while the rail was the cause.
+  if (!deps.isAdapterConnected()) {
     const [platform] = params.chat_id.split(":");
     return {
       success: false,
       error: "adapter_unavailable",
       detail: `${platform ?? "Unknown"} adapter is not connected`,
+    };
+  }
+
+  if (deps.safetyRail.killSwitch.isKilled) {
+    const cause = deps.safetyRail.killSwitch.killDetail;
+    return {
+      success: false,
+      error: "send_blocked",
+      detail:
+        "sending is blocked for every adapter by the safety kill switch, which tripped on " +
+        `repeated send failures${cause ? ` (last error: ${cause})` : ""}. ` +
+        "It stays tripped until the chatmux daemon is restarted.",
     };
   }
 
@@ -474,10 +489,19 @@ interface StatusInput {
   adapters: Record<string, StatusAdapterInfo>;
   dbSizeMb?: number;
   jsonlSizeMb?: number;
+  sendBlocked?: boolean;
+  sendBlockedReason?: string;
 }
 
 interface StatusOutput {
   adapters: Record<string, StatusAdapterInfo>;
+  /**
+   * The send kill switch. Independent of every adapter's `state` — it is shared, so all of
+   * them can read `connected` while none of them can send. Without this field the only way
+   * to learn that is to read the source.
+   */
+  send_blocked: boolean;
+  send_blocked_reason?: string;
   storage: {
     message_count: number;
     chat_count: number;
@@ -496,6 +520,8 @@ export function handleGetStatus(db: Database, input: StatusInput): StatusOutput 
 
   return {
     adapters: input.adapters,
+    send_blocked: input.sendBlocked ?? false,
+    ...(input.sendBlockedReason !== undefined ? { send_blocked_reason: input.sendBlockedReason } : {}),
     storage: {
       message_count: stats.message_count,
       chat_count: stats.chat_count,

@@ -16,7 +16,7 @@ send_message request
   │   └─ reaches the kill threshold → trips the KillSwitch
   │
   └─ Layer 3: KillSwitch (emergency stop)
-      └─ tripped → disconnect the adapter, manual reset required
+      └─ tripped → refuse every send, manual reset required (adapters stay connected)
 ```
 
 ### RateLimiter
@@ -60,9 +60,13 @@ The emergency stop.
 
 Behavior:
 
-- `recordAnomaly()` → accumulates; at the threshold sets `killed = true` and fires every kill listener.
+- `recordAnomaly(detail)` → accumulates; at the threshold sets `killed = true`, keeps `detail` as `killDetail`, and fires every kill listener.
 - `recordNormal()` → resets the anomaly count, but does **not** clear `killed`.
-- `reset()` → `killed = false` and count to zero. This is the manual recovery path.
+- `reset()` → `killed = false`, `killDetail` cleared, count to zero. This is the manual recovery path.
+
+`killDetail` exists because the switch latches: by the time anyone asks why sending stopped,
+the error that tripped it happened long ago and is gone from everywhere else. It is what
+`send_message` and `get_status` quote back.
 
 ### SafetyRail facade
 
@@ -126,8 +130,14 @@ interfere with each other.
 |------|-------|
 | Tracks | Consecutive `send_message` failures |
 | ErrorTracker kill threshold | 3 |
-| KillSwitch action | Disconnect the adapter |
+| KillSwitch action | `send_message` returns `send_blocked`. Adapters are left connected and keep receiving |
+| Scope | **One rail serves every platform** — three failed LINE sends block Telegram too |
+| Visibility | Logged once when it trips; `get_status` reports `send_blocked` and `send_blocked_reason` |
 | Recovery | `safetyRail.reset()` (manual) |
+
+Nothing disconnects. A tripped switch is invisible in each adapter's `state`, which is why
+`get_status` reports it separately: every adapter can read `connected` while none of them
+can send.
 
 ### (B) In the Adapter Runner: process crashes
 

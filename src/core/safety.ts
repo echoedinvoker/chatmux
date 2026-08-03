@@ -115,6 +115,7 @@ export class KillSwitch {
   private consecutiveAnomalies = 0;
   private readonly threshold: number;
   private killed = false;
+  private killedDetail: string | undefined;
   private killListeners: (() => void)[] = [];
 
   constructor(threshold: number = 1) {
@@ -125,6 +126,9 @@ export class KillSwitch {
     this.consecutiveAnomalies++;
     if (this.consecutiveAnomalies >= this.threshold && !this.killed) {
       this.killed = true;
+      // Kept so consumers can be told why sending stopped. The switch latches, so by the
+      // time anyone asks, the error that tripped it is long gone from anywhere else.
+      this.killedDetail = detail;
       for (const fn of this.killListeners) fn();
     }
   }
@@ -137,8 +141,14 @@ export class KillSwitch {
     return this.killed;
   }
 
+  /** Why it tripped. `undefined` while it has not. */
+  get killDetail(): string | undefined {
+    return this.killedDetail;
+  }
+
   reset() {
     this.killed = false;
+    this.killedDetail = undefined;
     this.consecutiveAnomalies = 0;
   }
 
@@ -162,9 +172,16 @@ export class SafetyRail {
     if (isNetworkError(err)) return;
     const action = await this.errorTracker.recordError(err);
     if (action === "kill") {
-      this.killSwitch.recordAnomaly(
-        err instanceof Error ? err.message : String(err),
-      );
+      const detail = err instanceof Error ? err.message : String(err);
+      // Latching and shared by every adapter, so a silent trip reads downstream as a
+      // connection fault on a platform that never had one. Say it once, here.
+      if (!this.killSwitch.isKilled) {
+        console.error(
+          `[safety] send kill switch tripped after ${this.errorTracker.count} consecutive send errors; ` +
+          `sending is blocked for every adapter until the daemon restarts. last error: ${detail}`,
+        );
+      }
+      this.killSwitch.recordAnomaly(detail);
     }
   }
 

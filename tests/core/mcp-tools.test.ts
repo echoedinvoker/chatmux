@@ -536,7 +536,11 @@ describe("send_message tool", () => {
     expect(result.error).toBe("adapter_unavailable");
   });
 
-  test("returns error when kill switch is tripped", async () => {
+  // A tripped kill switch and a disconnected adapter used to share one error code and
+  // one detail string, so the message told the operator to look at the connection while
+  // the real cause was the safety rail. Diagnosing it took elimination against the
+  // source. The two causes must now be distinguishable from the response alone.
+  test("a tripped kill switch is not reported as a connection problem", async () => {
     const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
     safety.killSwitch.recordAnomaly("test kill");
 
@@ -545,7 +549,34 @@ describe("send_message tool", () => {
       { chat_id: "line:c_alice", text: "hello" },
     );
     expect(result.success).toBe(false);
+    expect(result.error).toBe("send_blocked");
+    expect(result.detail).not.toMatch(/not connected/);
+  });
+
+  test("the kill switch detail says why sending is blocked and how to clear it", async () => {
+    const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
+    safety.killSwitch.recordAnomaly("upstream rejected the message");
+
+    const result = await handleSendMessage(
+      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterConnected: () => true },
+      { chat_id: "line:c_alice", text: "hello" },
+    );
+    // the reason it tripped, and the one action that clears a latching switch
+    expect(result.detail).toMatch(/upstream rejected the message/);
+    expect(result.detail).toMatch(/restart/i);
+  });
+
+  test("a disconnected adapter still reports a connection problem", async () => {
+    const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
+    safety.killSwitch.recordAnomaly("test kill");
+
+    const result = await handleSendMessage(
+      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterConnected: () => false },
+      { chat_id: "line:c_alice", text: "hello" },
+    );
+    expect(result.success).toBe(false);
     expect(result.error).toBe("adapter_unavailable");
+    expect(result.detail).toMatch(/not connected/);
   });
 
   test("records success on SafetyRail after successful send", async () => {
@@ -629,6 +660,26 @@ describe("get_status tool", () => {
     });
     expect(result.storage.db_size_mb).toBe(1.5);
     expect(result.storage.jsonl_size_mb).toBe(2.3);
+  });
+
+  // Every adapter can read "connected" while sending is blocked for all of them, because
+  // the send kill switch is shared and invisible. Status has to say so, or the only way
+  // to learn it is to read the source.
+  test("says when sending is blocked, separately from adapter connection state", () => {
+    const result = handleGetStatus(db, {
+      adapters: { line: { state: "connected", uptime_seconds: 3600 } },
+      sendBlocked: true,
+      sendBlockedReason: "upstream rejected the message",
+    });
+    expect(result.adapters.line.state).toBe("connected");
+    expect(result.send_blocked).toBe(true);
+    expect(result.send_blocked_reason).toBe("upstream rejected the message");
+  });
+
+  test("reports sending as not blocked by default", () => {
+    const result = handleGetStatus(db, { adapters: {} });
+    expect(result.send_blocked).toBe(false);
+    expect(result.send_blocked_reason).toBeUndefined();
   });
 });
 

@@ -352,6 +352,10 @@ function registerTools(server: McpServer): void {
         adapters: adaptersStatus,
         dbSizeMb: Math.round(dbSize * 100) / 100,
         jsonlSizeMb: Math.round(jsonlSize * 100) / 100,
+        sendBlocked: safety.killSwitch.isKilled,
+        ...(safety.killSwitch.killDetail !== undefined
+          ? { sendBlockedReason: safety.killSwitch.killDetail }
+          : {}),
       });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
