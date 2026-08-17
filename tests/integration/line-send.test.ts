@@ -74,7 +74,7 @@ describe.skipIf(!LIVE)("LINE adapter live send", () => {
     const deps: SendDeps = {
       safetyRail,
       sendToAdapter: (method, params) => runner.sendRequest(method, params),
-      isAdapterConnected: () => true,
+      isAdapterReachable: () => true,
     };
 
     const timestamp = new Date().toISOString();

@@ -440,7 +440,7 @@ describe("send_message tool", () => {
     });
 
     const result = await handleSendMessage(
-      { safetyRail: safety, sendToAdapter: mockSend, isAdapterConnected: () => true },
+      { safetyRail: safety, sendToAdapter: mockSend, isAdapterReachable: () => true },
       { chat_id: "line:c_alice", text: "hello" },
     );
     expect(result.success).toBe(true);
@@ -456,7 +456,7 @@ describe("send_message tool", () => {
       {
         safetyRail: safety,
         sendToAdapter: async () => ({ message_id: "m1", timestamp: 1234 }),
-        isAdapterConnected: () => true,
+        isAdapterReachable: () => true,
         recordOutgoing: (d) => { drafts.push(d); },
       },
       { chat_id: "line:c_alice", text: "hi" },
@@ -481,7 +481,7 @@ describe("send_message tool", () => {
       {
         safetyRail: safety,
         sendToAdapter: async () => { throw new Error("boom"); },
-        isAdapterConnected: () => true,
+        isAdapterReachable: () => true,
         recordOutgoing: (d) => { drafts.push(d); },
       },
       { chat_id: "line:c_alice", text: "hi" },
@@ -499,7 +499,7 @@ describe("send_message tool", () => {
       {
         safetyRail: safety,
         sendToAdapter: async () => ({ message_id: "m1", timestamp: 1234 }),
-        isAdapterConnected: () => false,
+        isAdapterReachable: () => false,
         recordOutgoing: (d) => { drafts.push(d); },
       },
       { chat_id: "line:c_alice", text: "hi" },
@@ -516,7 +516,7 @@ describe("send_message tool", () => {
       {
         safetyRail: safety,
         sendToAdapter: async () => ({ timestamp: 1234 }),
-        isAdapterConnected: () => true,
+        isAdapterReachable: () => true,
         recordOutgoing: (d) => { drafts.push(d); },
       },
       { chat_id: "line:c_alice", text: "hi" },
@@ -529,7 +529,7 @@ describe("send_message tool", () => {
   test("returns error when adapter is not connected", async () => {
     const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
     const result = await handleSendMessage(
-      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterConnected: () => false },
+      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterReachable: () => false },
       { chat_id: "line:c_alice", text: "hello" },
     );
     expect(result.success).toBe(false);
@@ -545,7 +545,7 @@ describe("send_message tool", () => {
     safety.killSwitch.recordAnomaly("test kill");
 
     const result = await handleSendMessage(
-      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterConnected: () => true },
+      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterReachable: () => true },
       { chat_id: "line:c_alice", text: "hello" },
     );
     expect(result.success).toBe(false);
@@ -558,7 +558,7 @@ describe("send_message tool", () => {
     safety.killSwitch.recordAnomaly("upstream rejected the message");
 
     const result = await handleSendMessage(
-      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterConnected: () => true },
+      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterReachable: () => true },
       { chat_id: "line:c_alice", text: "hello" },
     );
     // the reason it tripped, and the one action that clears a latching switch
@@ -566,17 +566,17 @@ describe("send_message tool", () => {
     expect(result.detail).toMatch(/restart/i);
   });
 
-  test("a disconnected adapter still reports a connection problem", async () => {
+  test("an unreachable adapter still reports the adapter, not the kill switch", async () => {
     const safety = new SafetyRail({ initialBackoffMs: 1, maxBackoffMs: 1 });
     safety.killSwitch.recordAnomaly("test kill");
 
     const result = await handleSendMessage(
-      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterConnected: () => false },
+      { safetyRail: safety, sendToAdapter: async () => ({}), isAdapterReachable: () => false },
       { chat_id: "line:c_alice", text: "hello" },
     );
     expect(result.success).toBe(false);
     expect(result.error).toBe("adapter_unavailable");
-    expect(result.detail).toMatch(/not connected/);
+    expect(result.detail).toMatch(/not running/);
   });
 
   test("records success on SafetyRail after successful send", async () => {
@@ -587,7 +587,7 @@ describe("send_message tool", () => {
       {
         safetyRail: safety,
         sendToAdapter: async () => ({ message_id: "m1", timestamp: 1 }),
-        isAdapterConnected: () => true,
+        isAdapterReachable: () => true,
       },
       { chat_id: "line:c_alice", text: "hello" },
     );
@@ -600,7 +600,7 @@ describe("send_message tool", () => {
       {
         safetyRail: safety,
         sendToAdapter: async () => { throw new Error("send failed"); },
-        isAdapterConnected: () => true,
+        isAdapterReachable: () => true,
       },
       { chat_id: "line:c_alice", text: "hello" },
     );

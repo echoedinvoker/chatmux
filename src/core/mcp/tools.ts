@@ -387,7 +387,7 @@ export type OutgoingDraft = Omit<JsonlEvent, "chat" | "sender" | "received_at"> 
 export interface SendDeps {
   safetyRail: SafetyRail;
   sendToAdapter: (method: string, params: unknown) => Promise<unknown>;
-  isAdapterConnected: () => boolean;
+  isAdapterReachable: () => boolean;
   recordOutgoing?: (draft: OutgoingDraft) => void;
 }
 
@@ -406,12 +406,16 @@ export async function handleSendMessage(
   // Two different reasons to refuse, and they need two different answers: one is fixed by
   // reconnecting the adapter, the other only by restarting the daemon. Sharing one message
   // between them sent a diagnosis at the connection for hours while the rail was the cause.
-  if (!deps.isAdapterConnected()) {
+  //
+  // Reachable, not connected: the adapter process being up is what a send needs. Its push
+  // stream is a separate lifetime, and gating on that one refused sends over adapters that
+  // were answering requests the whole time.
+  if (!deps.isAdapterReachable()) {
     const [platform] = params.chat_id.split(":");
     return {
       success: false,
       error: "adapter_unavailable",
-      detail: `${platform ?? "Unknown"} adapter is not connected`,
+      detail: `${platform ?? "Unknown"} adapter is not running`,
     };
   }
 

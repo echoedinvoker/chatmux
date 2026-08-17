@@ -209,7 +209,7 @@ integration test exercises the whole chain: `handleSendMessage` (tools.ts) →
 
 > **Where the chain stops.** It stops at the platform API. The suite builds its own
 > `AdapterRunner` and passes a `SendDeps` of just `{ safetyRail, sendToAdapter,
-> isAdapterConnected }` — no database, no JSONL writer. It asserts the send RPC succeeded
+> isAdapterReachable }` — no database, no JSONL writer. It asserts the send RPC succeeded
 > (`success`, `message_id`, `timestamp`) and nothing more. It cannot tell you the message
 > landed: no `messages` row, no `events.jsonl` line, no `chats.last_message_at` advance.
 > It also cannot, by construction — running it requires stopping the daemon, which is the
@@ -303,7 +303,7 @@ systemctl --user start chatmux
 5. **The test case**: call `handleSendMessage(deps, { chat_id: "<platform>:<target>", text: "..." })`.
    - `chat_id` carries the platform prefix.
    - `deps.sendToAdapter` wires to `runner.sendRequest`.
-   - `deps.isAdapterConnected` returns `true`, since connection was already awaited.
+   - `deps.isAdapterReachable` returns `true`, since connection was already awaited.
 6. **Assert**: `result.success === true`, `result.message_id` present and non-empty, `result.timestamp` a number.
 7. **Teardown** (`afterAll`): `runner.stop()`.
 8. **Mutation sanity check** (manual, not in CI): verify at least one regression — deliberately break a layer of the send path, watch the test go red, restore it, watch it go green. This proves the test has teeth.

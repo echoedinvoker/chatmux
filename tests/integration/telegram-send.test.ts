@@ -77,7 +77,7 @@ describe.skipIf(!LIVE)("Telegram live send", () => {
     const deps: SendDeps = {
       safetyRail,
       sendToAdapter: (method, params) => runner.sendRequest(method, params),
-      isAdapterConnected: () => true,
+      isAdapterReachable: () => true,
     };
 
     const result = await handleSendMessage(deps, {

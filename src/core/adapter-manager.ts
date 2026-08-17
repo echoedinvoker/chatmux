@@ -127,6 +127,22 @@ export class AdapterManager {
     return this.statuses.get(platform)?.connected ?? false;
   }
 
+  /**
+   * Whether a request/response call may be attempted right now. Deliberately not
+   * `isConnected`: that one tracks the adapter's *push* stream, and sending never
+   * touches it. Gating sends on it meant a laptop suspend demoted LINE to
+   * `reconnecting` — a state only an inbound message could clear — and every quiet
+   * stretch became a stretch where sending was refused over a healthy adapter.
+   *
+   * If the network really is down, the send fails at the adapter and comes back as
+   * `send_failed` with the platform's own words, which is the honest answer.
+   */
+  canSendVia(platform: string): boolean {
+    const runner = this.runners.get(platform);
+    if (!runner) return false;
+    return runner.isRunning && !runner.isKilled;
+  }
+
   isKilled(platform: string): boolean {
     return this.runners.get(platform)?.isKilled ?? false;
   }

@@ -263,7 +263,7 @@ function registerTools(server: McpServer): void {
       const deps: SendDeps = {
         safetyRail: safety,
         sendToAdapter: (method, params) => manager.sendRequest(platform, method, params),
-        isAdapterConnected: () => manager.isConnected(platform),
+        isAdapterReachable: () => manager.canSendVia(platform),
         recordOutgoing: (draft) => {
           const self = selfByPlatform.get(draft.platform);
           if (!self) {

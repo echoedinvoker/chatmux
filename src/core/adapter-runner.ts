@@ -191,6 +191,16 @@ export class AdapterRunner {
     return this.crashKillSwitch.isKilled;
   }
 
+  /**
+   * The adapter process is up and its JSON-RPC channel is open, so a request can
+   * be attempted. Says nothing about whatever long-lived stream the adapter keeps
+   * to its platform — those are separate lifetimes, and conflating them refuses
+   * request/response work that would have gone through fine.
+   */
+  get isRunning(): boolean {
+    return this.protocol !== null;
+  }
+
   onEvent(fn: (params: unknown) => void): void {
     this.eventListeners.push(fn);
   }

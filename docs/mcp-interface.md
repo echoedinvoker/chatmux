@@ -465,6 +465,16 @@ reader to inspect a connection that was healthy the whole time.
 `send_blocked` therefore quotes the error that tripped the switch and names the one action
 that clears it. `get_status` reports the same state as `send_blocked` / `send_blocked_reason`.
 
+**`adapter_unavailable` means the adapter process is down, not that its push stream is.**
+Sending is a request/response call and does not travel over the push stream, so the two have
+independent lifetimes. They were once gated together, and the cost showed up as soon as a
+laptop suspended: the LINE adapter's stream was declared dead, and only an *inbound* message
+could earn `connected` back, so every quiet stretch was also a stretch where sending was
+refused over an adapter that was answering backfill requests the whole time. The `connected`
+field reported by `get_status` still tracks the stream — it just no longer decides sends.
+When the network genuinely is down, the send is attempted and fails at the adapter, which
+returns `send_failed` carrying the platform's own error rather than a guess made in advance.
+
 **Example output** (send reached the adapter and failed there):
 ```json
 {
@@ -479,7 +489,7 @@ that clears it. `get_status` reports the same state as `send_blocked` / `send_bl
 {
   "success": false,
   "error": "adapter_unavailable",
-  "detail": "LINE adapter is not connected"
+  "detail": "line adapter is not running"
 }
 ```
 

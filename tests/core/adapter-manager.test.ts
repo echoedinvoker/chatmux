@@ -100,3 +100,45 @@ describe("AdapterStatus.lastLivenessEvidenceAt", () => {
     await manager.shutdownAll();
   });
 });
+
+describe("AdapterManager.canSendVia", () => {
+  it("stays true while the push stream is reconnecting", async () => {
+    // The bug this pins: sending is a request/response call and does not touch the
+    // push stream, but it was gated on push liveness. A suspended laptop demoted
+    // LINE to `reconnecting`, and only an *inbound* message could earn `connected`
+    // back — so every quiet stretch was also a stretch where sending was refused.
+    const mock = minimalSpawn("line");
+    const manager = new AdapterManager([{ platform: "line", command: ["fake"] }], {
+      spawn: () => () => mock.proc,
+    });
+    await manager.startAll();
+
+    mock.emitStatus({ state: "connected", last_liveness_evidence_at: 1 });
+    await sleep(20);
+    expect(manager.canSendVia("line")).toBe(true);
+
+    mock.emitStatus({ state: "reconnecting" });
+    await sleep(20);
+    expect(manager.isConnected("line")).toBe(false);
+    expect(manager.canSendVia("line")).toBe(true);
+
+    await manager.shutdownAll();
+  });
+
+  it("is false once the adapter process is gone", async () => {
+    const mock = minimalSpawn("line");
+    const manager = new AdapterManager([{ platform: "line", command: ["fake"] }], {
+      spawn: () => () => mock.proc,
+    });
+    await manager.startAll();
+    expect(manager.canSendVia("line")).toBe(true);
+
+    await manager.shutdownAll();
+    expect(manager.canSendVia("line")).toBe(false);
+  });
+
+  it("is false for an unknown platform", () => {
+    const manager = new AdapterManager([], { spawn: () => () => minimalSpawn("x").proc });
+    expect(manager.canSendVia("line")).toBe(false);
+  });
+});
