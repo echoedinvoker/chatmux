@@ -1,6 +1,28 @@
+/**
+ * Two fakes live in this file, and picking the wrong one silently voids the test.
+ *
+ * `createMockPushSource` models the *container* only: its `renew()` swaps in a
+ * fresh ReadableStream, which is a faithful copy of `opStream.renew()`
+ * (`@evex/linejs/base/push/connManager.ts:116-135`) — and of nothing else. It has
+ * no notion of a *connection*, so inside it "swap the container" and "recover"
+ * are the same event. In the real world they are not: `renew()` never touches the
+ * socket, so the new container has nobody feeding it.
+ *
+ * Consequence: the three `markStreamDead` tests below (`markStreamDead() demotes
+ * immediately and then reconnects` :341, `returns to connected on real stream
+ * evidence...` :382, `recovers event flow after a suspend-triggered stream death`
+ * :437 — line numbers as of 2026-08-17) are pass-through. They were green the
+ * whole time F78 was happening on the user's machine: no new LINE messages for
+ * minutes after a long suspend. Their greenness is not evidence that recovery
+ * works.
+ *
+ * Anything asserting on *recovery* must therefore use `createConnAwarePushSource`,
+ * which keeps container and connection apart.
+ */
 import { describe, it, expect, beforeEach } from "bun:test";
 import {
   ConnectionManager,
+  createPushSource,
   type PushSource,
   type ConnectionState,
   type ConnectionManagerOptions,
@@ -36,6 +58,10 @@ function createMockPushSource(options?: {
         },
       });
     },
+    killConnection() {
+      // No connection layer in this fake, so there is nothing to tear down —
+      // which is exactly why nothing asserting on recovery may use it (header).
+    },
     async initLegyPusher() {
       if (options?.initBehavior) {
         await options.initBehavior();
@@ -61,6 +87,163 @@ function createMockPushSource(options?: {
 }
 
 type MockPushSource = ReturnType<typeof createMockPushSource>;
+
+/**
+ * Connection-aware push source fake: the one to use for anything about recovery.
+ *
+ * It separates the two layers `createMockPushSource` collapses:
+ *   - the **container** (`opStream`). `renew()` swaps it and nothing else, so it
+ *     never restores the flow of events.
+ *   - the **connection**. Only building one restores the flow. Rebuilding is
+ *     modelled as linejs's own `initLegyPusher()` while-loop does it: after a
+ *     read fails, sleep `reconnectDelayMs`, then connect. There is exactly one
+ *     rebuilder here, on purpose — that is the invariant under test.
+ *
+ * Simulated time is driven by the injected clock via `advanceTo()`; no real timer
+ * is ever armed, so undici's real 300s h2 timeout costs the suite nothing. The
+ * caller must move its own clock variable first, then call `advanceTo(t)` — the
+ * `advance()` helper in each test does both.
+ *
+ * `connectCount` counts *rebuilds*: the fake is born with the connection the
+ * process started with, so a healthy run that never dies leaves it at 0.
+ */
+function createConnAwarePushSource(opts: {
+  h2TimeoutMs: number;
+  reconnectDelayMs: number;
+  now: () => number;
+}) {
+  let controller: ReadableStreamDefaultController<any> | null = null;
+
+  function newStream() {
+    return new ReadableStream<any>({
+      start(c) {
+        controller = c;
+      },
+    });
+  }
+
+  let currentStream = newStream();
+  // A live connection is attached to `currentStream` and events can land.
+  let feeding = true;
+  // Mirrors `Conn.resStream` being assigned (`conn.ts:133`): the handshake is
+  // done, so tearing the connection down is safe.
+  let handshakeComplete = true;
+  let connectCount = 0;
+  let h2DeadlineAt: number | null = null;
+  /**
+   * How many `initLegyPusher()` while-loops exist. Each one rebuilds the
+   * connection after a failed read, so two of them mean two LEGY connections for
+   * one account — the outcome `T-EXACTLY-ONCE` exists to forbid. chatmux calling
+   * `initLegyPusher()` a second time is what would produce that here, and in
+   * production.
+   */
+  let rebuilders = 0;
+  let pendingReconnects: number[] = [];
+
+  function connect(): void {
+    connectCount++;
+    feeding = true;
+    handshakeComplete = true;
+  }
+
+  /**
+   * The parked read fails right now, and every rebuilder starts its sleep. A
+   * second teardown while those sleeps are pending does *not* add more — the
+   * same reason two `Conn.close()` calls produce one reconnect in reality.
+   */
+  function tearDown(at: number, err: Error): void {
+    controller?.error(err);
+    controller = null;
+    feeding = false;
+    h2DeadlineAt = null;
+    if (pendingReconnects.length === 0) {
+      for (let i = 0; i < rebuilders; i++) {
+        pendingReconnects.push(at + opts.reconnectDelayMs);
+      }
+    }
+  }
+
+  return {
+    get stream() {
+      return currentStream;
+    },
+    renew() {
+      // Swapping the container neither starts nor stops the feed: linejs's
+      // writer closure (`connManager.ts:116-135`) keeps writing into whichever
+      // controller is current. A live connection follows the swap; a dead one
+      // stays dead, which is the whole point — `renew()` cannot recover anything.
+      currentStream = newStream();
+    },
+    killConnection() {
+      // R9 guard, mirrored: aborting mid-handshake produces an orphan rejection
+      // that kills the adapter process. Skip this round instead.
+      if (!handshakeComplete) return;
+      tearDown(opts.now(), new Error("terminated"));
+    },
+    async initLegyPusher() {
+      // Real shape: it goes in and never comes back — having first started the
+      // while-loop that owns rebuilding.
+      rebuilders++;
+      // A second loop does not wait politely behind the first: its opening move
+      // is `initializeConn()` with no sleep in front of it
+      // (`@evex/linejs/base/polling/mod.ts:153-157`), so it builds another
+      // connection there and then. The first call is the connection the process
+      // was already running on, which is why it does not count as a rebuild.
+      //
+      // linejs's sticky `islisten` flag happens to short-circuit a second call
+      // today, but the forbidden move is precisely to clear that flag to force a
+      // rebuild, so the fake models the unguarded case on purpose.
+      if (rebuilders > 1) connect();
+      await new Promise<void>(() => {});
+    },
+
+    get connectCount() {
+      return connectCount;
+    },
+    /** The host slept: the peer dropped us and nobody said so locally. */
+    dieSilently() {
+      feeding = false;
+      handshakeComplete = true;
+      h2DeadlineAt = opts.now() + opts.h2TimeoutMs;
+    },
+    /** Mid-handshake: `resStream` is not assigned yet. */
+    setHandshakeComplete(done: boolean) {
+      handshakeComplete = done;
+    },
+    enqueue(event: any) {
+      if (!feeding) return;
+      controller?.enqueue(event);
+    },
+    closeStream() {
+      controller?.close();
+      controller = null;
+      feeding = false;
+    },
+    errorStream(err: Error) {
+      controller?.error(err);
+      controller = null;
+      feeding = false;
+    },
+    advanceTo(t: number) {
+      for (;;) {
+        pendingReconnects.sort((a, b) => a - b);
+        const timeoutDue = h2DeadlineAt !== null && h2DeadlineAt <= t;
+        const reconnectDue =
+          pendingReconnects.length > 0 && pendingReconnects[0]! <= t;
+        if (!timeoutDue && !reconnectDue) return;
+        if (
+          timeoutDue &&
+          (!reconnectDue || h2DeadlineAt! <= pendingReconnects[0]!)
+        ) {
+          tearDown(h2DeadlineAt!, new Error("terminated")); // undici's h2 timeout
+        } else {
+          pendingReconnects.shift();
+          connect();
+        }
+      }
+    },
+  };
+}
 
 describe("ConnectionManager", () => {
   let push: MockPushSource;
@@ -464,5 +647,154 @@ describe("ConnectionManager", () => {
 
     expect(calls).toBeGreaterThan(0);
     expect(calls).toBeLessThan(50); // throttled; unguarded this is thousands
+  });
+
+  // T-RECOVERY-LATENCY — the F78 assertion. Uses the connection-aware fake, so
+  // "the container was swapped" cannot pass for "the connection came back".
+  it("T-RECOVERY-LATENCY: rebuilds the connection within 15s of a suspend-gap death", async () => {
+    let clock = 1_000_000;
+    const push = createConnAwarePushSource({
+      h2TimeoutMs: 300_000, // undici's real h2 timeout
+      reconnectDelayMs: 4_000, // linejs's sleep(4000) between rebuild attempts
+      now: () => clock,
+    });
+    const advance = (to: number) => {
+      clock = to;
+      push.advanceTo(to);
+    };
+
+    const states: ConnectionState[] = [];
+    const mgr = new ConnectionManager(push, { ...TEST_OPTS, now: () => clock });
+    mgr.onStateChange((s) => states.push(s));
+
+    mgr.start();
+    await sleep(20);
+    push.enqueue({ type: "SEND_MESSAGE", text: "before-sleep" });
+    await sleep(20);
+    expect(states.at(-1)).toBe("connected");
+
+    // The host slept. Nothing errors locally: the peer is gone and the parked
+    // read cannot know it until undici gives up, 300 simulated seconds away.
+    push.dieSilently();
+    mgr.markStreamDead("suspend-gap");
+    await sleep(50);
+
+    advance(1_015_000); // 15 simulated seconds later
+    await sleep(50);
+
+    expect(push.connectCount).toBe(1);
+
+    push.enqueue({ type: "SEND_MESSAGE", text: "after-resume" });
+    await sleep(30);
+    expect(states.at(-1)).toBe("connected");
+
+    mgr.stop();
+  });
+
+  // T-EXACTLY-ONCE — the sole-rebuilder invariant. chatmux only ever tears the
+  // connection down; building it back belongs to linejs's `initLegyPusher()`
+  // loop and to nothing else. Two rebuilders would mean two LEGY connections on
+  // one account: no error, no log, just duplicated or reordered messages.
+  it("T-EXACTLY-ONCE: two death declarations still rebuild the connection once", async () => {
+    let clock = 1_000_000;
+    const push = createConnAwarePushSource({
+      h2TimeoutMs: 300_000,
+      reconnectDelayMs: 4_000,
+      now: () => clock,
+    });
+    const advance = (to: number) => {
+      clock = to;
+      push.advanceTo(to);
+    };
+
+    const mgr = new ConnectionManager(push, { ...TEST_OPTS, now: () => clock });
+    mgr.start();
+    await sleep(20);
+    push.enqueue({ type: "SEND_MESSAGE", text: "before-sleep" });
+    await sleep(20);
+
+    push.dieSilently();
+    // The suspend detector and the crash guard both notice the same death and
+    // both call in. They are separate code paths and neither knows about the
+    // other, so this ordering is the normal case, not an edge case.
+    mgr.markStreamDead("suspend-gap");
+    mgr.markStreamDead("push-stream-failure");
+    await sleep(50);
+
+    advance(1_015_000);
+    await sleep(50);
+
+    expect(push.connectCount).toBe(1);
+
+    mgr.stop();
+  });
+});
+
+/**
+ * Contract test, not a behaviour test: it pins the interface chatmux depends on
+ * inside linejs (`Conn.close()` at `@evex/linejs/base/push/conn.ts:312`, reached
+ * through `client.base.push.conns[0]`). Asserting that a specific method gets
+ * called is the point — if a linejs upgrade renames or drops it, this goes red
+ * instead of F78 coming back silently. Do not delete it on the grounds that
+ * behaviour tests should not assert on calls.
+ */
+describe("createPushSource().killConnection()", () => {
+  function makeClient(conn?: unknown) {
+    return {
+      base: {
+        createPolling: () => ({ initLegyPusher: async () => {} }),
+        push: {
+          opStream: {
+            stream: new ReadableStream<any>({ start() {} }),
+            renew() {},
+          },
+          conns: conn === undefined ? [] : [conn],
+        },
+      },
+    } as any;
+  }
+
+  it("T-KILL-USES-CONN-CLOSE: tears the live connection down through Conn.close()", () => {
+    let closed = 0;
+    const source = createPushSource(
+      makeClient({
+        resStream: {},
+        close: () => {
+          closed++;
+        },
+      }),
+    );
+
+    source.killConnection();
+
+    expect(closed).toBe(1);
+  });
+
+  it("T-KILL-USES-CONN-CLOSE: having no connection object left is not an error", () => {
+    // Waking from suspend, `conns` can be empty; a throw here would surface
+    // inside the suspend detector's tick, where nothing catches it.
+    const source = createPushSource(makeClient());
+
+    expect(() => source.killConnection()).not.toThrow();
+  });
+
+  it("T-KILL-USES-CONN-CLOSE: leaves a half-built connection alone (R9)", () => {
+    // `resStream` unset means `Conn.new()`'s un-awaited fetch is still in
+    // flight. Aborting it produces a rejection nobody catches, which the crash
+    // guard rethrows — the adapter process dies. Skipping costs one round of
+    // slower recovery; linejs's own loop retries a failed handshake anyway.
+    let closed = 0;
+    const source = createPushSource(
+      makeClient({
+        resStream: undefined,
+        close: () => {
+          closed++;
+        },
+      }),
+    );
+
+    source.killConnection();
+
+    expect(closed).toBe(0);
   });
 });

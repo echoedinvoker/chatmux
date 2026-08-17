@@ -6,6 +6,12 @@ export interface PushSource {
   readonly stream: ReadableStream<any>;
   renew(): void;
   initLegyPusher(): Promise<void>;
+  /**
+   * Tear the underlying LEGY connection down. Never builds one: rebuilding
+   * belongs to linejs's `initLegyPusher()` while-loop and nowhere else. See
+   * `docs/line-adapter.md`, "Who rebuilds the LEGY connection".
+   */
+  killConnection(): void;
 }
 
 export function isNetworkError(err: unknown): boolean {
@@ -99,6 +105,28 @@ export function createPushSource(client: Client): PushSource {
     },
     initLegyPusher() {
       return polling.initLegyPusher();
+    },
+    killConnection() {
+      // linejs reaches its own connection the same way (`connManager.ts:491`
+      // closes `conns[0]` when the auth token changes), so this is a published
+      // path, not a private one we invented. Optional chaining throughout:
+      // after a suspend the connection object may already be gone, and a throw
+      // here would land in the suspend detector's tick with nobody to catch it.
+      const conn = (client.base.push as any).conns?.[0];
+
+      // `resStream` is assigned only once the fetch inside `Conn.new()` has come
+      // back (`@evex/linejs/base/push/conn.ts:133`), which makes it the signal
+      // that the handshake finished. Aborting before that rejects a fetch living
+      // in an un-awaited IIFE with no catch anywhere: an AbortError, which
+      // `isPushStreamFailure()` does not recognise, so the crash guard rethrows
+      // it and the adapter process dies. Skipping instead costs at most one
+      // slower recovery — linejs's loop retries a failed handshake by itself —
+      // and that trade is deliberate.
+      if (!conn?.resStream) return;
+
+      // `Conn.close()` is async and swallows its own errors, but a rejected
+      // promise here would become the very unhandled rejection we are avoiding.
+      Promise.resolve(conn.close?.()).catch(() => {});
     },
   };
 }
@@ -221,12 +249,20 @@ export class ConnectionManager {
 
   /**
    * Declare the push stream dead from the outside (crash guard, suspend
-   * detector). Cancels the reader so consumeLoop unwinds; the renew is left to
-   * consumeLoop's existing path so the stream is rebuilt exactly once.
+   * detector).
+   *
+   * Cancelling the reader only unwinds consumeLoop off the old container — it
+   * does nothing to the connection, and `renew()` does not either. After a long
+   * suspend the connection is already gone, and the read parked on it cannot
+   * fail until undici's 300s h2 timeout fires: that wait was F78, minutes of new
+   * messages not arriving with nothing on screen to say so. `killConnection()`
+   * detonates that timeout early. It only tears down; linejs's own loop is the
+   * sole rebuilder (`docs/line-adapter.md`).
    */
   markStreamDead(reason: string): void {
     console.error(`[LINE] push liveness: marked dead (${reason})`);
     this.setState("reconnecting");
+    this.push.killConnection();
     this.currentReader?.cancel().catch(() => {});
   }
 
