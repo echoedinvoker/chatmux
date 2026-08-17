@@ -726,6 +726,21 @@ System status summary.
 
 **Response**: same shape as the `get_status` tool output.
 
+**It is pushed when an adapter's state *changes*.** Subscribers get a
+`notifications/resources/updated` for this URI on each transition — not on each
+status report. Adapters report on a heartbeat, so repeated reports of the same
+state are dropped and never reach subscribers. Roughly twice a day in practice
+(24 days of journal: 43 transitions).
+
+**`adapters[].state` is the adapter's own state string, not a boolean rendered
+back into words.** Expect `connected`, `reconnecting`, `disconnected`, plus
+`killed` when the adapter was killed — and treat it as open-ended: whatever the
+adapter reports is forwarded verbatim. In particular `reconnecting` is a real,
+distinct value; it used to be flattened into `disconnected`, which is why a
+stalled LINE push connection was indistinguishable from a dead one (F80).
+`connected` (the boolean, in the tool output) still means only "no evidence the
+stream is dead" — for trustworthiness read `last_liveness_evidence_at`.
+
 ## Resource subscription
 
 ### Mechanism

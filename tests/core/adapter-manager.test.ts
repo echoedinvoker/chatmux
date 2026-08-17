@@ -142,3 +142,25 @@ describe("AdapterManager.canSendVia", () => {
     expect(manager.canSendVia("line")).toBe(false);
   });
 });
+
+describe("AdapterStatus.state (F80)", () => {
+  it("T-STATE-PRESERVED: reconnecting survives into getStatuses", async () => {
+    const mock = minimalSpawn("line");
+    const manager = new AdapterManager([{ platform: "line", command: ["fake"] }], {
+      spawn: () => () => mock.proc,
+    });
+    await manager.startAll();
+
+    mock.emitStatus({ state: "reconnecting" });
+    await sleep(20);
+    expect(manager.getStatuses().line!.state).toBe("reconnecting");
+    expect(manager.getStatuses().line!.connected).toBe(false);
+
+    mock.emitStatus({ state: "connected" });
+    await sleep(20);
+    expect(manager.getStatuses().line!.state).toBe("connected");
+    expect(manager.getStatuses().line!.connected).toBe(true);
+
+    await manager.shutdownAll(); // stabilityTimer is not unref'd; existing tests all end this way
+  });
+});

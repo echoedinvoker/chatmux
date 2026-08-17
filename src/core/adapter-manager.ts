@@ -4,6 +4,13 @@ import type { SafetyRail } from "./safety.js";
 
 export interface AdapterStatus {
   connected: boolean;
+  /**
+   * The adapter's own status string, kept verbatim. `connected` collapses it to
+   * two values, which loses `reconnecting` — and "reconnecting" is exactly the
+   * state a stalled LINE push connection sits in (F80). Read this when you need
+   * to tell "retrying" apart from "gave up"; read `connected` for reachability.
+   */
+  state: string;
   startTime: number;
   killed: boolean;
   /**
@@ -50,7 +57,7 @@ export class AdapterManager {
         crashTracker: this.opts.crashTracker,
       });
 
-      this.statuses.set(config.platform, { connected: false, startTime: 0, killed: false });
+      this.statuses.set(config.platform, { connected: false, state: "disconnected", startTime: 0, killed: false });
 
       runner.onEvent((params) => {
         for (const fn of this.eventListeners) fn(config.platform, params);
@@ -67,6 +74,11 @@ export class AdapterManager {
         if (typeof status.last_liveness_evidence_at === "number") {
           s.lastLivenessEvidenceAt = status.last_liveness_evidence_at;
         }
+        // Keep the raw string before collapsing it: `connected` below is a
+        // two-value view that existing callers (isConnected, canSendVia, onKill)
+        // depend on, so it stays exactly as it was — this only adds the value it
+        // was throwing away.
+        s.state = status.state;
         if (status.state === "connected") {
           s.connected = true;
           s.startTime = Date.now();
@@ -85,6 +97,9 @@ export class AdapterManager {
         if (s) {
           s.connected = false;
           s.killed = true;
+          // So `state` alone answers what callers used to reconstruct from
+          // `connected` plus `isKilled()` (daemon.ts's get_status did exactly that).
+          s.state = "killed";
         }
       });
 

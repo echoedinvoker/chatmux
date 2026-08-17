@@ -757,6 +757,23 @@ describe("MCP resources", () => {
     expect(data.storage.message_count).toBe(2);
   });
 
+  // T-RESOURCE-STATE is a FORWARDING-INVARIANCE GUARD, not coverage of the
+  // collapse this fixes. `handleResource` forwards `ctx.adapters` verbatim, so
+  // the real collapse lives at the caller (daemon.ts's resourceCtx), and
+  // daemon.ts has module-level side effects that make it unimportable from a
+  // test. This assertion only pins "the resource layer does not re-collapse what
+  // it is handed"; daemon.ts's two lines are guarded by the grep recorded in
+  // docs/architecture.md. Do not read a green here as "the resource layer is
+  // covered".
+  test("T-RESOURCE-STATE: chat://status forwards the raw three-state", () => {
+    const out = JSON.parse(
+      handleResource(db, "chat://status", {
+        adapters: { line: { state: "reconnecting", liveness_age_seconds: 12 } },
+      })!,
+    );
+    expect(out.adapters.line.state).toBe("reconnecting");
+  });
+
   test("returns null for unknown resource URI", () => {
     const result = handleResource(db, "chat://unknown", { adapters: {} });
     expect(result).toBeNull();

@@ -39,6 +39,7 @@ import {
 import { needsBackfill, backfillChat, type BackfillDeps } from "./backfill-on-demand.js";
 import { catchUpAdapter } from "./cold-start-catchup.js";
 import { createReconnectCatchupTrigger } from "./reconnect-catchup.js";
+import { createStatusChangeNotifier } from "./mcp/status-notify.js";
 
 const dataDir = resolve(
   process.env.CHATMUX_DATA_DIR ?? join(process.env.HOME ?? "~", ".local/share/chatmux"),
@@ -134,6 +135,13 @@ manager.onEvent((platform: string, params: unknown) => {
 // Fires on the adapter's raw three states, not the boolean core exposes through
 // get_status — so `reconnecting` is visible here even though the query APIs
 // never emit that string.
+// Pushes chat://status to subscribers when an adapter's state actually changes.
+// Without this, notifyStatusChanged() had no caller at all: the resource was
+// subscribable and nobody was ever told it had moved (F80).
+const statusNotifier = createStatusChangeNotifier({
+  notify: () => subscriptions.notifyStatusChanged(),
+});
+
 const reconnectCatchup = createReconnectCatchupTrigger({
   runCatchup: async (platform) => {
     console.error(`[daemon] [${platform}] reconnect catch-up: starting`);
@@ -145,6 +153,9 @@ const reconnectCatchup = createReconnectCatchupTrigger({
 manager.onStatus((platform: string, params: unknown) => {
   const status = params as { state: string };
   console.error(`[daemon] [${platform}] adapter status: ${status.state}`);
+  // Tell chat://status subscribers. Separate concern from the catch-up trigger
+  // below: same event, unrelated meaning — do not fold them together.
+  statusNotifier.onStatus(platform, status.state);
   // onStatus is typed `=> void`, so this promise has no owner. Keep the handler
   // synchronous and attach the platform to any failure — an anonymous top-level
   // rejection log is precisely the silence this project is removing.
@@ -336,7 +347,11 @@ function registerTools(server: McpServer): void {
           // `connected` here means "no evidence the stream is dead", NOT
           // "proven alive". Consumers judging trustworthiness should read
           // last_liveness_evidence_at, which only moves on real evidence.
-          state: status.connected ? "connected" : manager.isKilled(platform) ? "killed" : "disconnected",
+          // Report the adapter's own state string. It already carries "killed"
+          // (AdapterManager.onKill writes it), so this is semantically what the
+          // old `connected ? ... : isKilled() ? "killed" : "disconnected"` chain
+          // produced — minus the collapse that erased "reconnecting" (F80).
+          state: status.state,
           uptime_seconds: uptime,
           ...(status.lastLivenessEvidenceAt !== undefined
             ? {
@@ -379,7 +394,10 @@ function registerResources(server: McpServer): () => void {
     const statuses = manager.getStatuses();
     for (const [platform, status] of Object.entries(statuses)) {
       adapters[platform] = {
-        state: status.connected ? "connected" : "disconnected",
+        // The raw three-state, not a boolean flattened back into words: a stalled
+        // LINE push sits in "reconnecting" for minutes, and collapsing that to
+        // "disconnected" is what made the screen unable to say anything (F80).
+        state: status.state,
         ...(status.lastLivenessEvidenceAt !== undefined
           ? {
               last_liveness_evidence_at: status.lastLivenessEvidenceAt,

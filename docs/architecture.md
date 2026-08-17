@@ -248,6 +248,28 @@ background.
 | **SafetyRail** | Send rate limiting, send-failure ErrorTracker (kill at 3), KillSwitch | Storage, adapter lifecycle |
 | **MCP Server** | Tool dispatch, resource serving, subscription notifications | Platform connections, direct SQLite access (goes through the Storage query API) |
 
+### What `daemon.ts` costs us: it cannot be tested
+
+`src/core/daemon.ts` runs on import — it opens the database, spawns adapters and
+binds a socket at module level. A test that imports it starts a daemon. So
+**nothing inside daemon.ts is reachable by any test**, and any logic that lives
+there is guarded only by review.
+
+The practical consequence: keep logic out of it. Anything with a rule worth
+pinning gets its own module and its own test file — that is why
+`reconnect-catchup.ts` and `mcp/status-notify.ts` exist, rather than a few lines
+inline in the wiring.
+
+What is left inside is plain forwarding, and where forwarding can silently
+collapse a value it gets a grep as its guard. The adapter state forwarded to
+`chat://status` and to `get_status` used to flatten `reconnecting` into
+`disconnected`; both now pass the adapter's own string through. **This command
+must print nothing** — a hit means a collapse point came back:
+
+```
+$ cd ~/Documents/chatmux && grep -n 'connected ? "connected"' src/core/daemon.ts
+```
+
 ## Data directory layout
 
 ```
