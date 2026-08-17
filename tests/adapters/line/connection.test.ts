@@ -728,6 +728,52 @@ describe("ConnectionManager", () => {
 
     mgr.stop();
   });
+
+  // T-BACKFILL-ON-RECOVERY — regression guard for the catch-up that already
+  // exists in core. `createReconnectCatchupTrigger` (`src/core/reconnect-catchup.ts`)
+  // backfills on the edge from any non-connected state to `connected`, and it
+  // learns about that edge only from the status notifications this manager's
+  // state changes produce. So the messages missed during the gap come back iff
+  // recovery goes reconnecting → connected exactly once: no edge means no
+  // catch-up, and two edges would mean two passes over the same backlog.
+  it("T-BACKFILL-ON-RECOVERY: recovery emits one reconnecting→connected edge, with fresh evidence", async () => {
+    let clock = 1_000_000;
+    const push = createConnAwarePushSource({
+      h2TimeoutMs: 300_000,
+      reconnectDelayMs: 4_000,
+      now: () => clock,
+    });
+    const advance = (to: number) => {
+      clock = to;
+      push.advanceTo(to);
+    };
+
+    const states: ConnectionState[] = [];
+    const mgr = new ConnectionManager(push, { ...TEST_OPTS, now: () => clock });
+    mgr.onStateChange((s) => states.push(s));
+
+    mgr.start();
+    await sleep(20);
+    push.enqueue({ type: "SEND_MESSAGE", text: "before-sleep" });
+    await sleep(20);
+    expect(states.at(-1)).toBe("connected");
+    const beforeGap = states.length;
+
+    push.dieSilently();
+    mgr.markStreamDead("suspend-gap");
+    mgr.markStreamDead("push-stream-failure");
+    await sleep(50);
+
+    advance(1_015_000);
+    await sleep(50);
+    push.enqueue({ type: "RECEIVE_MESSAGE", text: "arrived-during-the-gap" });
+    await sleep(30);
+
+    expect(states.slice(beforeGap)).toEqual(["reconnecting", "connected"]);
+    expect(mgr.lastLivenessEvidenceAt).toBe(1_015_000);
+
+    mgr.stop();
+  });
 });
 
 /**

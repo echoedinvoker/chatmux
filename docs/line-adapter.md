@@ -78,6 +78,43 @@ Network errors are identified (`isNetworkError`) by:
 - Error code: `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENETUNREACH`, `EPIPE`
 - Error message containing `"fetch failed"`, `"network"`, `"socket hang up"`, `"econnrefused"`
 
+### Who rebuilds the LEGY connection
+
+**One rebuilder, and it is not us.** Rebuilding the connection belongs entirely to the
+`while` loop inside linejs's `initLegyPusher()` (`@evex/linejs/base/polling/mod.ts:150-172`):
+build a connection, read until the read fails, `sleep(4000)`, build again. chatmux only ever
+**tears down** — `killConnection()` in `push.ts`, called from `markStreamDead()`. It never
+builds.
+
+The reason to keep it that way: two rebuilders means two LEGY connections for one account.
+Nothing errors and nothing logs; messages just start arriving twice or out of order, and you
+find out from your phone. `T-EXACTLY-ONCE` in `tests/adapters/line/connection.test.ts` pins
+it — two death declarations, one rebuild.
+
+**`push.renew()` swaps the container, not the connection.** Its entire body is
+`this.stream = new ReadableStream(...)` (`@evex/linejs/base/push/connManager.ts:116-135`):
+no socket, no HTTP/2, no re-login. A renewed stream after the connection died is an empty
+pipe with nobody feeding it, which is why "we renewed, so we recovered" is never a valid
+inference — in the code or in a test fake.
+
+**Why tearing down is the fix (F78).** Suspend the host long enough and the peer drops the
+connection without telling anyone. The local read stays parked, so nothing fails, so linejs's
+loop never comes round — until undici's **300-second** h2 timeout finally fires. That wait was
+the bug: minutes of new messages not arriving, with `connected` on screen the whole time.
+`killConnection()` calls `Conn.close()` (`@evex/linejs/base/push/conn.ts:312`), which aborts
+the underlying HTTP/2 request and detonates that timeout early; linejs takes it from there.
+
+`killConnection()` skips a connection whose `resStream` is still unset. That field is
+assigned only after the fetch inside `Conn.new()` returns (`conn.ts:133`), so its absence
+means the handshake is still in flight — and aborting then rejects a promise living in an
+un-awaited IIFE, which the crash guard classifies as fatal and rethrows, taking the adapter
+process down. Skipping costs at most one slower recovery.
+
+⛔ **Never call `initLegyPusher()` from chatmux to speed a rebuild up, and never clear
+linejs's `islisten` flag to make it run again.** Both create a second rebuilder, which is the
+two-connections outcome above. `islisten` is sticky-true by design (see the comment in
+`pushLoop`); that stickiness is a guard, not an obstacle to work around.
+
 ## E2EE
 
 LINE messages are end-to-end encrypted. linejs's `decryptMessage()` handles decryption:
