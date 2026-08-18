@@ -352,6 +352,13 @@ async function main(): Promise<void> {
         throw reason;
       });
     },
+    isLoggedIn: () => lineClient !== null,
+    onLoginWindowNetworkError: (err) => {
+      console.error(
+        "[LINE] login-window network error, the login retry will handle it:",
+        err instanceof Error ? err.message : err,
+      );
+    },
   });
 
   responder.start();

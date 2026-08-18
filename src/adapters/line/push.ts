@@ -1,4 +1,5 @@
 import type { Client } from "@evex/linejs";
+import { classifyLoginFailure } from "./login-supervisor.js";
 
 export type ConnectionState = "connected" | "reconnecting" | "killed";
 
@@ -75,6 +76,12 @@ export interface PushCrashGuardDeps {
   };
   onStreamFailure: (err: unknown) => void;
   onFatal: (err: unknown) => void;
+  /**
+   * Both optional, and when neither is passed the guard behaves exactly as it
+   * did before — the existing tests in this file are that guarantee.
+   */
+  isLoggedIn?: () => boolean;
+  onLoginWindowNetworkError?: (err: unknown) => void;
 }
 
 /**
@@ -88,8 +95,21 @@ export interface PushCrashGuardDeps {
  */
 export function installPushCrashGuard(deps: PushCrashGuardDeps): void {
   deps.proc.on("unhandledRejection", (reason) => {
-    if (isPushStreamFailure(reason)) deps.onStreamFailure(reason);
-    else deps.onFatal(reason);
+    if (isPushStreamFailure(reason)) {
+      deps.onStreamFailure(reason);
+      return;
+    }
+    // The one place the fail-fast rule bends, and only here: before login has
+    // ever succeeded, a network rejection is the wake-from-suspend DNS failure
+    // that used to kill the whole process (2026-08-18). The login supervisor is
+    // already retrying it, so crashing helps nobody. Once we are logged in the
+    // strict behaviour comes straight back — a rejection we cannot explain must
+    // still be loud.
+    if (deps.isLoggedIn?.() === false && classifyLoginFailure(reason) === "network") {
+      deps.onLoginWindowNetworkError?.(reason);
+      return;
+    }
+    deps.onFatal(reason);
   });
 }
 

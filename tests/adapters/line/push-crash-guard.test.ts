@@ -85,3 +85,37 @@ describe("installPushCrashGuard", () => {
     expect(fatals).toHaveLength(1);
   });
 });
+
+describe("installPushCrashGuard during the login window", () => {
+  const dnsErr = () => Object.assign(new Error("getaddrinfo EAI_AGAIN legy.line-apps.com"), {
+    code: "EAI_AGAIN",
+  });
+
+  it("hands a DNS failure to the login retry instead of killing the process", () => {
+    const proc = fakeProc();
+    const seen: string[] = [];
+    installPushCrashGuard({
+      proc: proc as any,
+      onStreamFailure: () => seen.push("stream"),
+      onFatal: () => seen.push("fatal"),
+      onLoginWindowNetworkError: () => seen.push("login"),
+      isLoggedIn: () => false,
+    });
+    proc.emitRejection(dnsErr());
+    expect(seen).toEqual(["login"]);
+  });
+
+  it("still crashes on the same error once we are logged in", () => {
+    const proc = fakeProc();
+    const seen: string[] = [];
+    installPushCrashGuard({
+      proc: proc as any,
+      onStreamFailure: () => seen.push("stream"),
+      onFatal: () => seen.push("fatal"),
+      onLoginWindowNetworkError: () => seen.push("login"),
+      isLoggedIn: () => true,
+    });
+    proc.emitRejection(dnsErr());
+    expect(seen).toEqual(["fatal"]);
+  });
+});
