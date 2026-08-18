@@ -7,6 +7,7 @@ import { FileStorage } from "@evex/linejs/storage";
 import qrcode from "qrcode-terminal";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { classifyLoginFailure, shouldFallBackToQr } from "./login-supervisor.js";
 
 const MAX_QR_RETRIES = 5;
 
@@ -24,7 +25,21 @@ export async function loadAuthToken(dataDir: string): Promise<string | null> {
   }
 }
 
-export async function login(dataDir: string): Promise<Client> {
+/**
+ * One login attempt, and nothing more.
+ *
+ * The name matters: this used to be `login()`, and it used to treat *every*
+ * failure of the saved token as "the token stopped working" — including "there
+ * is no network yet", which is what actually happened on 2026-08-06 and
+ * 2026-08-18. It then walked into a QR loop that cannot succeed under the
+ * daemon, and after five tries gave up for good.
+ *
+ * Now the decision is explicit: classify the failure, ask `shouldFallBackToQr`,
+ * and if the answer is no, rethrow untouched so the login supervisor can wait
+ * and try again. Retrying is the supervisor's job; this function only ever
+ * makes one attempt.
+ */
+export async function loginOnce(dataDir: string): Promise<Client> {
   await mkdir(dataDir, { recursive: true });
   const storage = new FileStorage(join(dataDir, "storage.json"));
   const initOpts = { device: "IOSIPAD" as const, storage };
@@ -39,6 +54,14 @@ export async function login(dataDir: string): Promise<Client> {
       setupTokenRefresh(client, dataDir);
       return client;
     } catch (err) {
+      const kind = classifyLoginFailure(err);
+      if (!shouldFallBackToQr({ hasSavedToken: true, kind })) {
+        // Never mention the token itself here — only why we are not scanning.
+        console.error(
+          `[AUTH] the saved login did not go through, and the reason looks like a ${kind} problem rather than LINE rejecting us. Keeping the saved login and letting the retry handle it. Reason given: ${err instanceof Error ? err.message : err}`,
+        );
+        throw err;
+      }
       console.error(
         `[AUTH] the saved login has stopped working, so we will scan a QR code again. Reason given: ${err instanceof Error ? err.message : err}`,
       );

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleOp, handleSendMessage, handleBackfill, type MessageClient, type AdapterEvent } from "./messages.js";
 import { handleGetContacts, handleGetChats, ContactCache, enrichSenderName, type ContactClient } from "./contacts.js";
-import { login } from "./auth.js";
+import { loginOnce } from "./auth.js";
 import { handleGetMedia, type MediaClient, type GetMediaParams } from "./media.js";
 import {
   createPushSource,
@@ -14,6 +14,7 @@ import {
   type SuspendDetector,
 } from "./push.js";
 import { subscribeClientLog, safeStringify } from "./diagnostics.js";
+import { runLoginFlow } from "./login-supervisor.js";
 
 export interface InitializeParams {
   data_dir: string;
@@ -253,7 +254,20 @@ async function main(): Promise<void> {
       },
     };
 
-    connectLine(dataDir, responder).catch((err) => {
+    // 🔴 Fire-and-forget on purpose — do NOT await. `adapter-runner.ts` gives
+    // `initialize` a 10 second timeout, and a network failure is retried
+    // without limit; awaiting would time the handshake out, the runner would
+    // read that as a crash, and we would make the very problem this exists to
+    // fix strictly worse.
+    runLoginFlow({
+      responder,
+      attemptLogin: () => loginOnce(dataDir),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      initialBackoffMs: Number(process.env.CHATMUX_F77_LOGIN_BACKOFF_MS ?? 5_000),
+      maxBackoffMs: Number(process.env.CHATMUX_F77_LOGIN_MAX_BACKOFF_MS ?? 300_000),
+      unknownAttemptLimit: 10,
+      onLoggedIn: (client) => connectLine(client as Awaited<ReturnType<typeof loginOnce>>, responder),
+    }).catch((err) => {
       console.error("[LINE] connection failed:", err instanceof Error ? err.message : err);
       responder.notify("error", { message: `LINE login failed: ${err instanceof Error ? err.message : err}` });
     });
@@ -343,9 +357,12 @@ async function main(): Promise<void> {
   responder.start();
   console.error("[LINE] adapter started, waiting for initialize...");
 
-  async function connectLine(adapterDataDir: string, resp: AdapterResponder): Promise<void> {
-    console.error("[LINE] logging in...");
-    const client = await login(adapterDataDir);
+  // Everything that happens *after* a successful login. The login itself, and
+  // any retrying of it, belongs to runLoginFlow.
+  async function connectLine(
+    client: Awaited<ReturnType<typeof loginOnce>>,
+    resp: AdapterResponder,
+  ): Promise<void> {
     console.error("[LINE] logged in successfully");
 
     lineClient = {
