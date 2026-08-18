@@ -42,3 +42,18 @@ describe("createReconnectCatchupTrigger", () => {
     expect(maxActive).toBe(1);
   });
 });
+
+describe("createReconnectCatchupTrigger after a retried login", () => {
+  it("runs one catch-up after a login that took several attempts", async () => {
+    const runs: string[] = [];
+    const trigger = createReconnectCatchupTrigger({
+      runCatchup: async (p) => { runs.push(p); },
+    });
+
+    await trigger.onStatus("telegram", "reconnecting");
+    await trigger.onStatus("telegram", "reconnecting");
+    await trigger.onStatus("telegram", "connected");
+
+    expect(runs).toEqual(["telegram"]);
+  });
+});

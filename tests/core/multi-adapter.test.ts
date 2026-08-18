@@ -3,8 +3,9 @@ import { PassThrough } from "node:stream";
 import type { SpawnResult } from "../../src/core/adapter-runner.js";
 import { AdapterManager } from "../../src/core/adapter-manager.js";
 import type { AdapterConfig } from "../../src/core/config.js";
+import { createReconnectCatchupTrigger } from "../../src/core/reconnect-catchup.js";
 
-function createMockSpawn(platform: string, opts?: { crashAfterMs?: number }) {
+function createMockSpawn(platform: string, opts?: { crashAfterMs?: number; statusSequence?: string[] }) {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -30,15 +31,24 @@ function createMockSpawn(platform: string, opts?: { crashAfterMs?: number }) {
       try {
         const msg = JSON.parse(line);
         if (msg.method === "initialize") {
-          setImmediate(() => stdout.write(JSON.stringify({
-            jsonrpc: "2.0", id: msg.id,
-            result: {
-              platform,
-              supported_events: ["message"],
-              can_send: true,
-              can_backfill: true,
-            },
-          }) + "\n"));
+          setImmediate(() => {
+            stdout.write(JSON.stringify({
+              jsonrpc: "2.0", id: msg.id,
+              result: {
+                platform,
+                supported_events: ["message"],
+                can_send: true,
+                can_backfill: true,
+              },
+            }) + "\n");
+            // A real adapter announces its connection state *after* the
+            // handshake, which is exactly when a retried login would.
+            for (const state of opts?.statusSequence ?? []) {
+              stdout.write(JSON.stringify({
+                jsonrpc: "2.0", method: "status", params: { state },
+              }) + "\n");
+            }
+          });
         } else if (msg.method === "shutdown") {
           setImmediate(() => {
             stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }) + "\n");
@@ -271,5 +281,41 @@ describe("AdapterManager", () => {
 
     const statuses2 = manager.getStatuses();
     expect(statuses2.telegram.connected).toBe(true);
+  });
+});
+
+describe("a login that needed several attempts", () => {
+  let manager: AdapterManager;
+
+  afterEach(async () => {
+    if (manager) await manager.shutdownAll();
+  });
+
+  it("catches up exactly once — not twice, and not never", async () => {
+    const mockTelegram = createMockSpawn("telegram", {
+      statusSequence: ["reconnecting", "reconnecting", "connected"],
+    });
+
+    manager = new AdapterManager(
+      [{ platform: "telegram", command: ["python", "tg.py"] }],
+      { spawn: () => () => mockTelegram.proc },
+    );
+
+    // Wired the same way daemon.ts:145-165 wires it: AdapterManager itself
+    // knows nothing about reconnect-catchup.ts, so a test that skips this line
+    // would assert against a manager with no catch-up attached at all — green,
+    // and testing nothing.
+    let count = 0;
+    const trigger = createReconnectCatchupTrigger({
+      runCatchup: async () => { count++; },
+    });
+    manager.onStatus((p, params) => {
+      void trigger.onStatus(p, (params as { state: string }).state);
+    });
+
+    await manager.startAll();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(count).toBe(1);
   });
 });

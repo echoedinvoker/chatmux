@@ -141,7 +141,42 @@ const decrypted = await client.decryptMessage(rawMessage);
 
 1. Read the authToken → `loginWithAuthToken(savedToken, opts)`.
 2. Success → proceed.
-3. Failure (expired token) → fall back to QR code login.
+3. Failure → classify it first (see below). Only a *credential* failure falls back to QR login.
+
+### When the login fails, and what happens next (F77)
+
+What this buys you: after the host suspends and wakes before the network is
+back, LINE comes back on its own. It used to not — the adapter tried once,
+misread "no network" as "the token died", walked into a QR loop nobody can see
+under systemd, and stayed dead until someone ran
+`systemctl --user restart chatmux`. It happened on 2026-08-06 and again on
+2026-08-18, the second time for four hours and forty-seven minutes.
+
+`classifyLoginFailure` in `src/adapters/line/login-supervisor.ts` sorts a failed
+login into three kinds, and each gets a different answer:
+
+| Kind | Examples | What we do | QR fallback? |
+|------|----------|-----------|--------------|
+| `network` | `EAI_AGAIN`, `ENETUNREACH`, bare `fetch failed` | Retry forever, backoff 5s → 10s → … capped at 5 min | **Never** |
+| `credential` | `AUTHENTICATION_FAILED`, `INVALID_TOKEN` | Stop after one attempt, report `error` | Yes |
+| `unknown` | anything else | Retry up to 10 times, then report `error` | **Never** |
+
+`unknown` deliberately does not drift towards `network`: an unrecognised failure
+gets a bounded number of attempts, because we do not know whether waiting helps.
+And a first install is unaffected — with no saved token, QR is the only path
+there is.
+
+While it retries, the adapter emits `{"state": "reconnecting"}` once per failed
+attempt (not on a timer). chat.nvim only paints `[line: no push Xm]` after the
+F80 threshold of 90 seconds, so a short outage retries quietly and never
+becomes a permanent red string people learn to ignore.
+
+⛔ **"I restarted the service and it came back" does not tell you this path
+works.** Restarting fixed it before this change existed too — it is how both
+incidents were recovered. The only evidence that counts is the connection
+returning *without* a restart. In tests that means a fake login and a fake
+clock, with "is the network up" as the variable being simulated; a stub that
+merely returns success proves nothing.
 
 ### Token refresh
 
