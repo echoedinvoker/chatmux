@@ -70,6 +70,43 @@ export function isPushStreamFailure(err: unknown): boolean {
   return false;
 }
 
+/**
+ * "The resolver could not answer *right now*" — and nothing else.
+ *
+ * F85, 2026-08-19: the host woke from suspend before the network interface came
+ * back, a fetch to legy.line-apps.com rejected with EAI_AGAIN nested one level
+ * down as a `cause`, and because that happens *after* login the guard below sent
+ * it to onFatal and the whole adapter died.
+ *
+ * The set is exactly one code, and that narrowness is the whole design:
+ *
+ *  - `EAI_AGAIN` is the resolver saying "temporary failure, try again". No
+ *    programming bug and no misconfiguration produces it; only a resolver that
+ *    is unreachable this instant does.
+ *  - `ENOTFOUND` / `EAI_NONAME` are deliberately NOT here even though a waking
+ *    host can emit them. They mean "this name does not exist", which is
+ *    indistinguishable at the code level from someone mistyping a hostname —
+ *    treating those as transient would turn a permanent misconfiguration into an
+ *    infinite quiet reconnect loop.
+ *
+ * Message text is never consulted, for the same reason `isPushStreamFailure`
+ * refuses to: "fetch failed" is also what an expired TLS certificate says.
+ */
+const TRANSIENT_RESOLVER_CODES = new Set(["EAI_AGAIN"]);
+
+export function isTransientResolverFailure(err: unknown): boolean {
+  let current: unknown = err;
+  // Bounded like the two walkers above, so a cyclic `cause` cannot hang us.
+  for (let depth = 0; depth < 3; depth++) {
+    if (!(current instanceof Error)) return false;
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && TRANSIENT_RESOLVER_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+    if (current === undefined || current === null) return false;
+  }
+  return false;
+}
+
 export interface PushCrashGuardDeps {
   proc: {
     on(event: "unhandledRejection", fn: (reason: unknown) => void): unknown;
@@ -82,6 +119,15 @@ export interface PushCrashGuardDeps {
    */
   isLoggedIn?: () => boolean;
   onLoginWindowNetworkError?: (err: unknown) => void;
+  /**
+   * A transient resolver failure that needs the *reconnect* path, not a crash.
+   * `consecutive` counts these since process start and never resets: a resolver
+   * that never comes back shows up as a number that keeps climbing, which is the
+   * only difference between "recovering" and "stuck forever" that a log can
+   * carry. When this is not wired the guard falls back to `onStreamFailure` —
+   * the same recovery action — never to `onFatal`.
+   */
+  onRecoverableNetworkError?: (err: unknown, consecutive: number) => void;
 }
 
 /**
@@ -89,11 +135,15 @@ export interface PushCrashGuardDeps {
  * the push connection inside an un-awaited async IIFE, so no try/catch in this
  * file can ever see it. The only interception point is process level.
  *
- * Anything we do not positively recognise as a push stream failure is handed to
- * `onFatal`, which must keep today's fail-fast behaviour — trading a crash for
- * a silent log would just swap one silence for another.
+ * Anything we do not positively recognise is handed to `onFatal`, which must
+ * keep today's fail-fast behaviour — trading a crash for a silent log would just
+ * swap one silence for another. Every exception below is therefore a *positively
+ * identified* class with a named recovery action, never a widening of the
+ * default: "we could not explain it" still means "be loud".
  */
 export function installPushCrashGuard(deps: PushCrashGuardDeps): void {
+  let transientRecoveries = 0;
+
   deps.proc.on("unhandledRejection", (reason) => {
     if (isPushStreamFailure(reason)) {
       deps.onStreamFailure(reason);
@@ -107,6 +157,23 @@ export function installPushCrashGuard(deps: PushCrashGuardDeps): void {
     // still be loud.
     if (deps.isLoggedIn?.() === false && classifyLoginFailure(reason) === "network") {
       deps.onLoginWindowNetworkError?.(reason);
+      return;
+    }
+    // F85. The strict rule above is unchanged in substance — it just stops
+    // covering a case it was never reasoning about. A DNS "try again later"
+    // after login is not an unexplained rejection: it is explained, precisely,
+    // and the explanation says the stream is gone and needs rebuilding. So it
+    // takes the *same* recovery the push-stream-failure branch takes rather than
+    // a new branch that logs and returns. Note this classifier looks only at
+    // EAI_AGAIN, never at message text, so an unexplained "fetch failed" still
+    // falls through to onFatal below.
+    if (isTransientResolverFailure(reason)) {
+      transientRecoveries += 1;
+      if (deps.onRecoverableNetworkError) {
+        deps.onRecoverableNetworkError(reason, transientRecoveries);
+      } else {
+        deps.onStreamFailure(reason);
+      }
       return;
     }
     deps.onFatal(reason);

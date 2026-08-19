@@ -359,6 +359,18 @@ async function main(): Promise<void> {
         err instanceof Error ? err.message : err,
       );
     },
+    // F85: DNS not back yet after a resume. Same recovery as a stream failure —
+    // the connection really is gone — but logged under its own name so the
+    // journal distinguishes "the stream died" from "we could not resolve the
+    // host", and carrying the running count so a resolver that never recovers
+    // reads as a climbing number instead of the same line forever.
+    onRecoverableNetworkError: (err, consecutive) => {
+      console.error(
+        `[LINE] transient resolver failure (#${consecutive}), reconnecting:`,
+        err instanceof Error ? err.message : err,
+      );
+      connection?.markStreamDead("transient-resolver-failure");
+    },
   });
 
   responder.start();
