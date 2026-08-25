@@ -57,3 +57,27 @@ describe("createReconnectCatchupTrigger after a retried login", () => {
     expect(runs).toEqual(["telegram"]);
   });
 });
+
+describe("the sequence the Telegram adapter now emits (F79)", () => {
+  it("runs one catch-up per outage, and none for the connect that opens the process", async () => {
+    // This exact list is what the adapter's liveness supervisor produces over a
+    // process lifetime — see test_states_always_alternate_across_repeated_outages
+    // in chatmux-adapter-telegram/tests/test_liveness.py. Before F79 the list was
+    // just ["connected"], for 21 hours, while 211 messages waited.
+    const runs: string[] = [];
+    const trigger = createReconnectCatchupTrigger({
+      runCatchup: async (p) => {
+        runs.push(p);
+      },
+    });
+
+    const emitted = ["connected", "reconnecting", "connected", "reconnecting", "connected"];
+    for (const state of emitted) {
+      await trigger.onStatus("telegram", state);
+    }
+
+    // Two outages, two catch-ups. The opening `connected` belongs to cold start,
+    // so counting it here would fetch the same backlog twice on every boot.
+    expect(runs).toEqual(["telegram", "telegram"]);
+  });
+});
